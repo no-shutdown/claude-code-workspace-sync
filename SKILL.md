@@ -31,6 +31,8 @@ description: 跨设备同步 Claude Code 工作空间(对话摘要 + 涉及的 g
 - `/workspace-sync push [<name>]`
 - `/workspace-sync pull <name>`
 - `/workspace-sync list`
+- `/workspace-sync clean <name>`
+- `/workspace-sync clean --all`
 - "把这次对话同步到云端"、"push 到工作空间"
 - "从 XX 工作空间继续"、"pull workspace XX"
 
@@ -74,11 +76,78 @@ description: 跨设备同步 Claude Code 工作空间(对话摘要 + 涉及的 g
         └── meta.json      (remote/upstream/branch/head)
 ```
 
+如果某些 skill 需要跨设备恢复工作区级状态,额外保存:
+
+```text
+<workspace-name>/
+└── skill-states/
+    └── <skill-name>/
+        ├── manifest.json
+        └── <artifact>.tgz
+```
+
+这一层的边界必须明确:
+- `workspace-sync` 不猜测 skill 内部目录结构
+- `workspace-sync` 不理解 skill 内部格式
+- `workspace-sync` 只负责调用 skill 的 export/import、保存产物、记录结果
+- 哪些内容可导出/可恢复,由各 skill 通过统一契约自己定义
+
+## Skill State 标准接口
+
+每个要接入 `workspace-sync` 的 skill,如果需要同步自身状态,必须在自己的 skill 根目录提供:
+
+```text
+workspace-sync.contract.json
+```
+
+格式:
+
+```json
+{
+  "contract_version": 1,
+  "skill": "sdd",
+  "states": [
+    {
+      "name": "project-state",
+      "scope": "project",
+      "portability": "portable",
+      "export_command": "./scripts/export-workspace-state.sh",
+      "import_command": "./scripts/import-workspace-state.sh"
+    },
+    {
+      "name": "global-cache",
+      "scope": "global",
+      "portability": "nonportable"
+    }
+  ]
+}
+```
+
+字段约束:
+- `scope`:
+  - `project`: 绑定到某个项目工作区
+  - `global`: 绑定到当前设备上的全局 skill 状态
+- `portability`:
+  - `portable`: 可跨设备导出/导入
+  - `nonportable`: 不允许跨设备同步
+- `export_command` / `import_command`:
+  - 只有 `portable` 状态才允许提供
+  - 由 skill 自己负责实现
+
+标准规则:
+- `workspace-sync` 只处理声明为 `portable` 的状态
+- `project` 和 `global` 都允许存在,但都必须显式声明 portability
+- `nonportable` 状态一律不得导出
+- `workspace-sync` 不为任何 skill 实现专用执行器
+- 其他 skill 只要遵守该接口,就可以被 `workspace-sync` 编排
+
 ## manifest.json 格式
 
 ```json
 {
   "name": "存量名单导入重构",
+  "version": 3,
+  "previous_version": 2,
   "conversation_id": "71fc3842-...",
   "source_device": "company-pc",
   "source_cwd": "D:\\A-ukon-work\\shanks-manage",
@@ -91,9 +160,33 @@ description: 跨设备同步 Claude Code 工作空间(对话摘要 + 涉及的 g
       "branch": "feature/import",
       "head": "abc123"
     }
+  ],
+  "skill_states": [
+    {
+      "skill": "sdd",
+      "state": "project-state",
+      "scope": "project",
+      "portability": "portable",
+      "project": "shanks-manage",
+      "status": "exported",
+      "artifact": "skill-states/sdd/shanks-manage-project-state.tgz"
+    }
   ]
 }
 ```
+
+`skill_states` 可以为空或省略。启用 skill 状态同步后:
+- `status=exported`: 该 skill 成功导出了可移植的 workspace state
+- `status=skipped`: 检测到该 skill,但当前环境无法导出
+- `status=not_exported`: 当前 workspace 没有启用该 skill 的状态同步
+- `status=deferred`: 导出产物存在,但当前环境暂不导入
+
+版本字段:
+- `version`: 当前 workspace 的远端版本号,每次 push 递增
+- `previous_version`: 本次 push 之前看到的远端版本
+- `workspace-sync` 必须用这两个字段做乐观并发校验
+
+这里记录的是**导出/恢复结果**,不是 skill 的内部数据结构。
 
 ## summary.md 格式
 
@@ -319,9 +412,23 @@ mkdir -p "$STAGE_DIR/projects"
 cp "$SESSION_JSONL" "$STAGE_DIR/conversation.jsonl"
 ```
 
-## Step 6: 校验每个项目已经提交并推送
+## Step 6: 读取当前远端版本并计算下一个版本号
 
-v1 的原则是:工作空间同步重点是聊天上下文恢复,代码恢复只支持**已经提交且已经推送**的状态。
+```bash
+CURRENT_REMOTE_VERSION=0
+
+# backend-specific:
+# - 如果远端 workspace 已存在,读取其 manifest.json.version
+# - 不存在则保持 0
+
+NEXT_VERSION=$((CURRENT_REMOTE_VERSION + 1))
+```
+
+如果读取失败但远端对象存在,直接报错,不要盲目覆盖。
+
+## Step 7: 校验每个项目已经提交并推送
+
+当前原则是:工作空间同步重点是聊天上下文恢复,代码恢复只支持**已经提交且已经推送**的状态。
 
 ```bash
 for each detected project:
@@ -350,7 +457,7 @@ for each detected project:
 
 只要有一个项目不满足,整个 push 直接终止。不要在代码状态不确定时生成可跨设备恢复的 workspace。
 
-## Step 7: Claude 生成 summary.md 和 manifest.json
+## Step 8: Claude 生成 summary.md 和 manifest.json
 
 Claude 用 Read 工具读 session jsonl,然后用 Write 工具写入:
 - `$STAGE_DIR/summary.md`
@@ -362,7 +469,11 @@ Claude 用 Read 工具读 session jsonl,然后用 Write 工具写入:
 3. 讨论脉络(纯讨论时):共识/待议/决策
 4. "下一步"必须具体:"继续写 XXController" > "继续开发"
 
-## Step 8: 记录每个项目的 git 指针
+写 manifest 时必须包含:
+- `version: NEXT_VERSION`
+- `previous_version: CURRENT_REMOTE_VERSION`
+
+## Step 9: 记录每个项目的 git 指针
 
 ```bash
 for each detected project:
@@ -375,17 +486,64 @@ for each detected project:
   )
 ```
 
-## Step 9: 调用 backend-specific 上传
+## Step 10: 调用 skill state 标准接口导出 portable 状态
+
+如果本次 workspace 里明确涉及某个 skill,Claude 应该尝试:
+1. 找到该 skill 的安装目录
+2. 读取 `workspace-sync.contract.json`
+3. 遍历其中 `states`
+4. 只对 `portability=portable` 的状态调用 `export_command`
+5. 把结果写入 `$STAGE_DIR/skill-states/<skill-name>/`
+
+导出约束:
+- `pid`、`lock`、`tmp`、daemon 状态、设备绑定信息不得标记为 `portable`
+- `global` 状态是否可同步,完全由 contract 的 `portability` 决定
+- `workspace-sync` 不再区分“skill 状态”和“skill 全局缓存”,统一按 `scope + portability` 处理
+- 如果 skill 没有 contract:
+  - 记录 `status=not_exported`
+  - 不要猜测其目录结构
+- 如果 contract 存在但 export 失败:
+  - 记录 `status=skipped`
+  - 不影响整个 workspace 的上下文保存
+
+如果启用该能力,manifest 中要额外写入 `skill_states` 的导出结果。
+
+## Step 11: 上传前做一次乐观并发校验
+
+在真正覆盖远端 workspace 之前,再读取一次远端版本:
+
+```bash
+LATEST_REMOTE_VERSION=<backend-specific read>
+```
+
+如果 `LATEST_REMOTE_VERSION != CURRENT_REMOTE_VERSION`,说明在本次 push 期间远端已被其他设备更新。
+
+Claude 必须明确提示用户:
+- 你本地基于的版本: `CURRENT_REMOTE_VERSION`
+- 当前远端版本: `LATEST_REMOTE_VERSION`
+- 计划提交的新版本原本是: `NEXT_VERSION`
+
+然后询问用户是否继续:
+- 如果继续:
+  - 重新设 `NEXT_VERSION=LATEST_REMOTE_VERSION+1`
+  - 重写 manifest 中的 `version`/`previous_version`
+  - 再执行上传
+- 如果取消:
+  - 直接停止本次 push
+
+## Step 12: 调用 backend-specific 上传
 
 根据 `$BACKEND` 分派到对应实现(见下方"后端实现")。
 
-## Step 10: 报告成功
+## Step 13: 报告成功
 
 ```
 ✓ 工作空间已推送: <name>
   - 后端: gitlab / minio
+  - 版本: v<NEXT_VERSION> (previous v<CURRENT_REMOTE_VERSION>)
   - 涉及项目: N 个
   - 代码前提: 所有项目均已提交并已推送
+  - skill 状态: 按 skill contract 中声明的 portable 状态导出
   - 在另一设备用 /workspace-sync pull <name> 恢复
 ```
 
@@ -431,11 +589,96 @@ pull 的汇报必须分两层:
 - 工作空间上下文恢复: `summary.md` + `conversation.jsonl`
 - 项目代码恢复: exact / skipped
 
+再增加第三层:
+- skill 状态恢复: restored / skipped / missing / deferred
+
+含义:
+- `restored`: skill 的可移植 workspace state 已恢复
+- `skipped`: 检测到该 skill,但当前环境或版本不满足恢复条件
+- `missing`: 本次 workspace 明确没有导出该 skill 状态
+- `deferred`: 技能状态归档已保留,但需等 skill 安装后再 import
+
 只要摘要成功恢复,就可以继续对话;但如果某些项目被 skip,Claude 必须明确告诉用户这些项目的代码现场没有完全恢复,不能把 summary 当作当前代码事实。
 
-## Step 4: 注入 summary.md 到当前上下文
+如果工作空间明确提到了某个 skill,但该 skill 状态没有恢复成功,Claude 必须额外说明:
+- 当前 workspace 涉及该 skill
+- 但该 skill 的工作区状态未完全恢复
+- 与该 skill 相关的摘要只能作为参考,不能当作当前现场事实
+
+## Step 4: 调用 skill state 标准接口导入 portable 状态
+
+对 `manifest.skill_states` 中的每一项:
+- 找到对应 skill 的安装目录
+- 读取其 `workspace-sync.contract.json`
+- 找到匹配的 `state`
+- 如果存在 `import_command`,则执行导入
+
+恢复规则:
+- skill 未安装 → `deferred`
+- contract 缺失 → `deferred`
+- contract 存在但 state 不兼容/版本不符 → `skipped`
+- import 成功 → `restored`
+- 本次 workspace 没有该 skill 的导出记录 → `missing`
+
+## Step 5: 注入 summary.md 到当前上下文
 
 Claude 用 Read 工具读 summary.md,告诉用户恢复了什么,准备继续工作。
+
+---
+
+# Clean 流程
+
+## Step 1: 解析命令
+
+支持:
+- `/workspace-sync clean <name>`
+- `/workspace-sync clean --all`
+
+不支持部分 pull,也不做自动 TTL 清理。
+
+## Step 2: 列出将要删除的内容
+
+`clean <name>`:
+- 远端保存的 `<name>`
+- 本地 staging 缓存中的 `<name>`
+- 本地 pending/deferred skill state 中与 `<name>` 相关的缓存
+
+`clean --all`:
+- 当前 backend 下的全部 workspace
+- 本地全部 workspace staging 缓存
+- 本地全部 pending/deferred skill state 缓存
+
+## Step 3: 二次确认
+
+Claude 必须先展示将删除的目标,然后确认:
+
+```text
+将删除以下内容:
+  - 远端 workspace: <name>
+  - 本地缓存: <name>
+
+确认继续? [y/N]
+```
+
+`clean --all` 必须使用更强确认:
+
+```text
+这会删除当前 backend 下的全部 workspace 及本地缓存。
+请明确回复: DELETE ALL
+```
+
+## Step 4: 执行删除
+
+先删除远端,再删除本地缓存。每一步都必须做路径校验,避免误删。
+
+## Step 5: 报告结果
+
+```text
+✓ 已清理 workspace: <name>
+  - 远端: deleted
+  - 本地缓存: deleted
+  - pending skill state: deleted
+```
 
 ---
 
@@ -466,6 +709,11 @@ fi
 
 ```bash
 WS_DIR="$LOCAL_REPO/$WS_NAME"
+CURRENT_REMOTE_VERSION=0
+if [[ -f "$WS_DIR/manifest.json" ]]; then
+  CURRENT_REMOTE_VERSION=$(python3 -c "import json; print(json.load(open(r'$WS_DIR/manifest.json')).get('version', 0) or 0)" 2>/dev/null || echo 0)
+fi
+
 [[ "$WS_DIR" == "$LOCAL_REPO/"* ]] || { echo "非法 workspace 路径"; exit 1; }
 rm -rf -- "$WS_DIR"
 mkdir -p "$WS_DIR"
@@ -506,6 +754,30 @@ for WS in */; do
 done
 ```
 
+## Clean
+
+```bash
+cd "$LOCAL_REPO"
+
+if [[ "$WS_NAME" == "--all" ]]; then
+  for WS in */; do
+    WS="${WS%/}"
+    [[ "$WS" == ".git" ]] && continue
+    [[ -f "$WS/manifest.json" ]] || continue
+    rm -rf -- "$WS"
+  done
+else
+  WS_DIR="$LOCAL_REPO/$WS_NAME"
+  [[ "$WS_DIR" == "$LOCAL_REPO/"* ]] || { echo "非法 workspace 路径"; exit 1; }
+  rm -rf -- "$WS_DIR"
+fi
+
+git add -A
+git -c user.email="workspace-sync@local" -c user.name="workspace-sync" \
+    commit -m "workspace: clean ${WS_NAME} from $(hostname)" || echo "nothing to commit"
+no_proxy="$GITLAB_HOST" git push origin "$GITLAB_BRANCH"
+```
+
 ---
 
 # 后端实现:MinIO
@@ -527,6 +799,10 @@ BUCKET_PATH="$MC_ALIAS/$MINIO_BUCKET/$MINIO_PREFIX"
 ## Push
 
 ```bash
+# 读取当前远端版本
+CURRENT_REMOTE_VERSION=$(mc cat "$BUCKET_PATH$WS_NAME/manifest.json" 2>/dev/null | \
+  python3 -c "import json,sys; print(json.load(sys.stdin).get('version', 0) or 0)" 2>/dev/null || echo 0)
+
 # 先删除云端已有的同名工作空间(覆盖)
 mc rm --recursive --force "$BUCKET_PATH$WS_NAME/" 2>/dev/null
 
@@ -553,6 +829,16 @@ mc cp --recursive "$BUCKET_PATH$WS_NAME/" "$STAGE_DIR/"
 mc ls "$BUCKET_PATH" 2>/dev/null | awk '{print $NF}' | sed 's|/$||'
 ```
 
+## Clean
+
+```bash
+if [[ "$WS_NAME" == "--all" ]]; then
+  mc rm --recursive --force "$BUCKET_PATH"
+else
+  mc rm --recursive --force "$BUCKET_PATH$WS_NAME/"
+fi
+```
+
 ---
 
 # 边界处理
@@ -568,16 +854,18 @@ mc ls "$BUCKET_PATH" 2>/dev/null | awk '{print $NF}' | sed 's|/$||'
 | push 时项目存在未提交改动 | 直接报错,要求用户先 commit/push |
 | push 时项目没有 upstream | 直接报错,要求用户先 `git push -u` |
 | push 时项目与 upstream 不同步 | 直接报错,要求用户先同步代码 |
+| push 时发现远端版本已变化 | 告警并询问用户是否基于最新版本继续提交 |
 | 项目路径未映射(pull 时) | 交互询问用户,写入 local-paths.json |
 | 记录的 `head` 在目标设备不存在 | 跳过该项目并报错 |
 | pull 时本地有未提交改动 | 跳过该项目并报错,不要覆盖当前工作区 |
+| 某个 skill 未安装或版本不兼容 | 该 skill 状态记为 `skipped` 或 `deferred`,但不影响 workspace 上下文恢复 |
+| 某个 skill 没有 export/import 契约 | 直接视为 `not_exported`,不要猜测其内部目录结构 |
+| clean 时目标不存在 | 明确提示 nothing to clean,不要报致命错误 |
 | workspace 名称非法 | 立即报错,不要做任何删除/覆盖操作 |
 
 ---
 
-# 不在 v1 范围内的功能
+# 暂未实现的功能
 
-- skill 状态同步(`.sdd/`、`.ccb/` 等)
-- 多设备并发冲突保护(乐观锁)
-- 部分 pull(`--only backend`)
-- workspace 自动清理 / TTL
+- GitHub / S3 后端支持
+- workspace 版本历史浏览与回滚

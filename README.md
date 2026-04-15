@@ -11,8 +11,9 @@
 - 本地未提交改动
 - 已提交但未 push 的本地提交
 - `.gitignore` 忽略文件
+- 未声明为 `portable` 的 skill 状态
 
-当前 v1 的设计目标很明确：优先恢复工作空间上下文，代码侧只恢复“已经提交且已经推送”的状态。
+当前版本的设计目标很明确：优先恢复工作空间上下文，代码侧只恢复“已经提交且已经推送”的状态。
 
 ---
 
@@ -40,6 +41,7 @@ Claude Code 的上下文默认是本地的。
 /workspace-sync push "feature-x"   # 离开当前设备前
 /workspace-sync pull "feature-x"   # 在另一台设备继续
 /workspace-sync list               # 查看已保存的 workspace
+/workspace-sync clean "feature-x"  # 手动清理一个 workspace
 ```
 
 ### push 时会做什么
@@ -50,11 +52,14 @@ Claude Code 的上下文默认是本地的。
   - 没有未提交改动
   - 已设置 upstream
   - 与 upstream 完全同步
+- 读取该 workspace 当前远端版本号，并计算下一个版本号
 - 记录每个项目的：
   - `remote`
   - `upstream`
   - `branch`
   - `HEAD`
+- 调用相关 skill 暴露的标准化 export 接口，导出可移植状态
+- 上传前再次校验远端版本是否变化，必要时告警确认
 - 上传到你配置的后端
 
 ### pull 时会做什么
@@ -62,15 +67,23 @@ Claude Code 的上下文默认是本地的。
 - 下载指定 workspace
 - 恢复 `summary.md` 和 `conversation.jsonl`
 - 根据每个项目记录的 git 指针恢复代码位置
+- 调用相关 skill 暴露的标准化 import 接口，恢复可移植状态
 - 把摘要重新注入当前 Claude 会话，方便继续工作
+
+### clean 时会做什么
+
+- 支持删除单个 workspace
+- 支持删除当前 backend 下的全部 workspace
+- 同时清理本地 staging 缓存和待导入的 skill 状态缓存
+- 删除前强制二次确认
 
 ---
 
-## v1 的边界
+## 当前边界
 
 这版是一个保守实现。
 
-为了避免“聊天上下文恢复了，但代码现场其实不一致”这种误导，v1 直接采用严格规则：
+为了避免“聊天上下文恢复了，但代码现场其实不一致”这种误导，当前直接采用严格规则：
 
 - `push` 前，相关项目必须先把代码处理干净
 - 只允许同步“已提交且已 push”的代码状态
@@ -88,6 +101,12 @@ git push              # 本地提交必须已经推送
 - 有 staged 但未 commit 的改动
 - 当前分支没有 upstream
 - 本地和 upstream 不同步
+
+另外，当前版本使用 workspace `version` 做乐观并发控制：
+
+- 每次 `push` 都会让该 workspace 的版本号递增
+- 上传前如果发现远端版本已经被其他设备推进，会告警并让你确认是否继续
+- 继续后会基于最新远端版本重新生成下一个版本号
 
 ---
 
@@ -185,10 +204,13 @@ workspace-sync/
 ├── README.md
 ├── install.sh
 ├── uninstall.sh
+├── docs/
+│   └── skill-state-contract.md
 ├── scripts/
 │   └── detect-projects.sh
 └── templates/
-    └── config.json.example
+    ├── config.json.example
+    └── workspace-sync.contract.example.json
 ```
 
 说明：
@@ -198,6 +220,7 @@ workspace-sync/
 - `templates/`：安装时使用的模板文件
 - `install.sh`：安装脚本
 - `uninstall.sh`：卸载脚本
+- `docs/skill-state-contract.md`：其他 skill 接入 workspace-sync 的标准接口说明
 
 ---
 
@@ -273,6 +296,13 @@ workspace-sync/
 /workspace-sync list
 ```
 
+### 4. 手动清理
+
+```bash
+/workspace-sync clean my-task
+/workspace-sync clean --all
+```
+
 ---
 
 ## Workspace 存储格式
@@ -284,6 +314,10 @@ workspace-sync/
 ├── manifest.json
 ├── summary.md
 ├── conversation.jsonl
+├── skill-states/
+│   └── <skill-name>/
+│       ├── manifest.json
+│       └── <artifact>.tgz
 └── projects/
     └── <project-name>/
         └── meta.json
@@ -295,6 +329,65 @@ workspace-sync/
 - `summary.md`：Claude 生成的结构化摘要
 - `conversation.jsonl`：完整对话备份
 - `projects/<project>/meta.json`：项目的 `remote / upstream / branch / head`
+- `skill-states/`：由其他 skill 通过标准 contract 导出的可移植状态
+
+`manifest.json` 里还应包含：
+- `version`
+- `previous_version`
+- `skill_states`
+
+---
+
+## skill 状态同步的边界
+
+当前版本不再用“缓存”和“状态”做主观区分，而是统一通过标准契约声明：
+
+- `scope`
+  - `project`
+  - `global`
+- `portability`
+  - `portable`
+  - `nonportable`
+
+原因很简单：
+- 本地缓存往往包含 `pid`、lock、tmp、绝对路径、设备绑定状态
+- 这些内容跨设备通常不可靠
+- `workspace-sync` 不应该猜测某个 skill 内部哪些文件可迁移
+
+所以这里的边界是：
+
+- `workspace-sync` 只负责工作空间上下文、项目 git 指针，以及 skill 状态编排
+- skill 自己负责定义哪些内容属于可移植的 state
+- skill 自己负责 export / import / 兼容性判断
+- `project/global` 只是作用域
+- `portable/nonportable` 才决定能不能跨设备同步
+
+标准接口文件：
+
+```text
+~/.claude/skills/<skill-name>/workspace-sync.contract.json
+```
+
+示例模板：
+
+[`templates/workspace-sync.contract.example.json`](./templates/workspace-sync.contract.example.json)
+
+完整说明：
+
+[`docs/skill-state-contract.md`](./docs/skill-state-contract.md)
+
+当前规则是：
+
+1. skill 显式提供 export / import 能力
+2. `workspace-sync` 统一调用这些入口
+3. `workspace-sync` 只记录和汇报恢复结果，不理解 skill 内部格式
+4. `nonportable` 状态一律不同步
+5. `global` 状态是否可同步，不由 `workspace-sync` 猜，而由 contract 明确声明
+
+也就是说：
+
+- 不同步未声明的内容
+- 只同步 skill 自己声明为 `portable` 的 state
 
 ---
 
@@ -346,10 +439,84 @@ workspace-sync/
 - 本地工作区有未提交改动
 - 记录的 `HEAD` 在目标设备不可用
 
+### 3. skill 状态恢复
+
+这层是当前版本协议的一部分，恢复结果应独立汇报，例如：
+
+- `restored`
+- `skipped`
+- `missing`
+- `deferred`
+
+含义：
+
+- `restored`：skill 的工作区状态已恢复
+- `skipped`：检测到该 skill，但当前环境不满足恢复条件
+- `missing`：这次 workspace 没有导出该 skill 状态
+- `deferred`：状态归档已保留，等安装 skill 后再导入
+
+如果工作空间明确涉及某个 skill，但其状态没有恢复成功，Claude 应该明确提示：
+- 该 skill 的状态未完全恢复
+- 与该 skill 相关的摘要只能作为参考
+- 不能把相关摘要当作当前工作现场事实
+
 所以这个 skill 的正确使用方式是：
 
 - 先把代码状态整理干净再 `push`
-- 再用 workspace 同步上下文和代码指针
+- 再用 workspace 同步上下文、代码指针和可移植 skill 状态
+
+---
+
+## 版本号与并发控制
+
+每个 workspace 都有独立版本号：
+
+- 首次 push：`version = 1`
+- 之后每次 push：`version += 1`
+
+同时会记录：
+
+- `previous_version`
+
+作用：
+
+- 检测当前 push 是基于哪个远端版本生成的
+- 在多设备同时 push 同一个 workspace 时发出告警
+
+处理规则：
+
+1. push 开始时先读取远端当前版本
+2. 计算本次 `next_version`
+3. 上传前再读取一次远端版本
+4. 如果远端版本已变化，Claude 必须告警并让用户确认是否继续
+5. 如果继续，则基于最新远端版本重新计算 `next_version`
+
+---
+
+## 手动清理
+
+支持命令：
+
+```bash
+/workspace-sync clean my-task
+/workspace-sync clean --all
+```
+
+### clean 一个 workspace
+
+会删除：
+- 远端保存的该 workspace
+- 本地 staging 缓存
+- 本地 pending / deferred 的 skill 状态缓存
+
+### clean --all
+
+会删除：
+- 当前 backend 下的全部 workspace
+- 本地全部 workspace staging 缓存
+- 本地全部 pending / deferred 的 skill 状态缓存
+
+删除前必须确认。
 
 ---
 
@@ -362,16 +529,16 @@ workspace-sync/
   - 下划线 `_`
   - 短横线 `-`
 - `push` 时如果检测到项目代码不干净，会直接失败
+- `push` 时如果发现远端版本已变化，会先告警再继续
 - `pull` 时如果本地项目有未提交改动，该项目会被跳过，不会强制覆盖
+- `clean --all` 必须使用强确认
 
 ---
 
-## 路线图
+## 后续规划
 
-- 同步更多 skill 状态，如 `.sdd/`、`.ccb/`
-- 多设备并发冲突保护
-- workspace 自动清理 / TTL
 - GitHub / S3 后端支持
+- workspace 版本历史浏览与回滚
 
 ---
 

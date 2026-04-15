@@ -1,0 +1,18 @@
+{
+  "contract_version": 1,
+  "skill": "example-skill",
+  "states": [
+    {
+      "name": "project-state",
+      "scope": "project",
+      "portability": "portable",
+      "export_command": "./scripts/export-workspace-state.sh",
+      "import_command": "./scripts/import-workspace-state.sh"
+    },
+    {
+      "name": "global-cache",
+      "scope": "global",
+      "portability": "nonportable"
+    }
+  ]
+}
