@@ -7,7 +7,7 @@ description: 跨设备同步 Claude Code 工作空间(对话摘要 + 涉及的 g
 
 ## 概述
 
-把当前对话的工作状态(对话摘要 + 涉及的所有 git 项目的 branch/HEAD/未提交改动)打包上传到云端。另一台设备 pull 下来后,Claude 读摘要就能恢复上下文,每个项目的分支和未提交改动也会自动恢复。
+把当前对话的工作状态(对话摘要 + 涉及的所有 git 项目的 branch/upstream/HEAD)打包上传到云端。另一台设备 pull 下来后,Claude 读摘要就能恢复上下文;代码侧只恢复到已经提交并已推送的状态,不负责搬运本地未推/未提交改动。
 
 **自动适配三种场景**(不需要区分模式):
 - 纯讨论:projects 为空,只存摘要和对话
@@ -71,8 +71,7 @@ description: 跨设备同步 Claude Code 工作空间(对话摘要 + 涉及的 g
 ├── conversation.jsonl     (完整对话备份)
 └── projects/
     └── <project-name>/
-        ├── meta.json      (remote/branch/head)
-        └── uncommitted.patch
+        └── meta.json      (remote/upstream/branch/head)
 ```
 
 ## manifest.json 格式
@@ -88,9 +87,9 @@ description: 跨设备同步 Claude Code 工作空间(对话摘要 + 涉及的 g
     {
       "name": "shanks-manage",
       "remote": "git@your.gitlab.com:namespace/your-project.git",
+      "upstream": "origin/feature/import",
       "branch": "feature/import",
-      "head": "abc123",
-      "has_patch": true
+      "head": "abc123"
     }
   ]
 }
@@ -134,6 +133,13 @@ read_json_nested() {
 }
 
 BACKEND=$(python3 -c "import json; print(json.load(open('$CONFIG')).get('backend') or '')" 2>/dev/null)
+
+validate_ws_name() {
+  local name="$1"
+  [[ -n "$name" ]] || return 1
+  [[ "$name" != "." && "$name" != ".." ]] || return 1
+  [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]]
+}
 ```
 
 如果 `BACKEND` 为空或对应 backend 的必填字段为空 → 进入 **首次配置流程**(见下方)。
@@ -188,7 +194,7 @@ ENC_PATH=$(printf '%s' "$GITLAB_PROJECT_PATH" | sed 's|/|%2F|g')
 
 RESULT=$(no_proxy="$GITLAB_HOST" curl -s -o /dev/null -w "%{http_code}" \
   --header "PRIVATE-TOKEN: $GITLAB_TOKEN" \
-  "http://${GITLAB_HOST}/api/v4/projects/${ENC_PATH}")
+  "https://${GITLAB_HOST}/api/v4/projects/${ENC_PATH}")
 
 if [[ "$RESULT" != "200" ]]; then
   echo "❌ 仓库验证失败 (HTTP $RESULT)"
@@ -287,18 +293,64 @@ PROJECTS_JSON=$(bash "$SCRIPT" "$SESSION_JSONL")
 
 N=0 → 纯讨论模式继续。
 
+所有接受 `<name>` 的命令(至少 `push`/`pull`)在真正读写本地路径或云端对象前,都必须先校验工作空间名称。
+
+Push 确认通过后先校验工作空间名称:
+
+```bash
+validate_ws_name "$WS_NAME" || {
+  echo "❌ 非法工作空间名称: $WS_NAME"
+  echo "   仅允许字母、数字、点、下划线、短横线"
+  exit 1
+}
+```
+
 ## Step 5: 准备工作空间暂存目录(本地 staging)
 
 ```bash
-STAGE_DIR="$HOME/.claude/workspace-cache/staging/$WS_NAME"
-rm -rf "$STAGE_DIR"
+CACHE_DIR="${CACHE_DIR:-$HOME/.claude/workspace-cache}"
+STAGE_ROOT="$CACHE_DIR/staging"
+STAGE_DIR="$STAGE_ROOT/$WS_NAME"
+[[ "$STAGE_DIR" == "$STAGE_ROOT/"* ]] || { echo "非法 staging 路径"; exit 1; }
+rm -rf -- "$STAGE_DIR"
 mkdir -p "$STAGE_DIR/projects"
 
 # 复制 session jsonl
 cp "$SESSION_JSONL" "$STAGE_DIR/conversation.jsonl"
 ```
 
-## Step 6: Claude 生成 summary.md 和 manifest.json
+## Step 6: 校验每个项目已经提交并推送
+
+v1 的原则是:工作空间同步重点是聊天上下文恢复,代码恢复只支持**已经提交且已经推送**的状态。
+
+```bash
+for each detected project:
+  cd "$PROJECT_PATH"
+
+  [[ -z "$(git status --porcelain)" ]] || {
+    echo "❌ 项目 $PROJECT_NAME 存在未提交改动,请先 commit/push 后再执行 workspace-sync push"
+    exit 1
+  }
+
+  UPSTREAM=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)
+  [[ -n "$UPSTREAM" ]] || {
+    echo "❌ 项目 $PROJECT_NAME 当前分支没有上游分支,请先 push -u"
+    exit 1
+  }
+
+  git fetch --prune
+  COUNTS=$(git rev-list --left-right --count HEAD...@{u})
+  AHEAD=$(echo "$COUNTS" | awk '{print $1}')
+  BEHIND=$(echo "$COUNTS" | awk '{print $2}')
+  [[ "$AHEAD" == "0" && "$BEHIND" == "0" ]] || {
+    echo "❌ 项目 $PROJECT_NAME 与上游分支不同步(ahead=$AHEAD behind=$BEHIND),请先同步代码后再执行 workspace-sync push"
+    exit 1
+  }
+```
+
+只要有一个项目不满足,整个 push 直接终止。不要在代码状态不确定时生成可跨设备恢复的 workspace。
+
+## Step 7: Claude 生成 summary.md 和 manifest.json
 
 Claude 用 Read 工具读 session jsonl,然后用 Write 工具写入:
 - `$STAGE_DIR/summary.md`
@@ -310,7 +362,7 @@ Claude 用 Read 工具读 session jsonl,然后用 Write 工具写入:
 3. 讨论脉络(纯讨论时):共识/待议/决策
 4. "下一步"必须具体:"继续写 XXController" > "继续开发"
 
-## Step 7: 捕获每个项目的 git 状态
+## Step 8: 记录每个项目的 git 指针
 
 ```bash
 for each detected project:
@@ -318,21 +370,22 @@ for each detected project:
   mkdir -p "$PROJ_DIR"
   (
     cd "$PROJECT_PATH"
-    git diff HEAD > "$PROJ_DIR/uncommitted.patch"
+    UPSTREAM=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}')
     # 写 meta.json(见 manifest 格式)
   )
 ```
 
-## Step 8: 调用 backend-specific 上传
+## Step 9: 调用 backend-specific 上传
 
 根据 `$BACKEND` 分派到对应实现(见下方"后端实现")。
 
-## Step 9: 报告成功
+## Step 10: 报告成功
 
 ```
 ✓ 工作空间已推送: <name>
   - 后端: gitlab / minio
   - 涉及项目: N 个
+  - 代码前提: 所有项目均已提交并已推送
   - 在另一设备用 /workspace-sync pull <name> 恢复
 ```
 
@@ -345,8 +398,17 @@ for each detected project:
 ## Step 2: 根据 backend 下载工作空间到本地 staging
 
 ```bash
-STAGE_DIR="$HOME/.claude/workspace-cache/staging/$WS_NAME"
-rm -rf "$STAGE_DIR"
+validate_ws_name "$WS_NAME" || {
+  echo "❌ 非法工作空间名称: $WS_NAME"
+  echo "   仅允许字母、数字、点、下划线、短横线"
+  exit 1
+}
+
+CACHE_DIR="${CACHE_DIR:-$HOME/.claude/workspace-cache}"
+STAGE_ROOT="$CACHE_DIR/staging"
+STAGE_DIR="$STAGE_ROOT/$WS_NAME"
+[[ "$STAGE_DIR" == "$STAGE_ROOT/"* ]] || { echo "非法 staging 路径"; exit 1; }
+rm -rf -- "$STAGE_DIR"
 mkdir -p "$STAGE_DIR"
 ```
 
@@ -358,9 +420,18 @@ backend-specific 下载(见下方)。
 1. 查 `local-paths.json`,用 git_remote 找本地路径
 2. 找不到 → 询问用户,写入 local-paths.json
 3. 到本地路径执行:
-   - 备份本地未提交改动到 `~/.claude/workspace-backup/<时间戳>/`
-   - `git fetch` + `git checkout <branch>`
-   - `git apply --3way uncommitted.patch`,冲突不中断其他项目
+   - 如果本地项目有未提交改动:`git status --porcelain` 非空 → 报错并跳过该项目,不要覆盖当前工作区
+   - `git fetch --all --prune`
+   - 校验 `meta.json`/`manifest.json` 里的 `head` 是否存在:`git cat-file -e <head>^{commit}`
+   - 不存在 → 报错并跳过该项目
+   - 存在 → `git checkout -B <branch> <head>`
+   - 如果记录了 `upstream`,则把本地 branch 重新关联到该 upstream
+
+pull 的汇报必须分两层:
+- 工作空间上下文恢复: `summary.md` + `conversation.jsonl`
+- 项目代码恢复: exact / skipped
+
+只要摘要成功恢复,就可以继续对话;但如果某些项目被 skip,Claude 必须明确告诉用户这些项目的代码现场没有完全恢复,不能把 summary 当作当前代码事实。
 
 ## Step 4: 注入 summary.md 到当前上下文
 
@@ -382,7 +453,7 @@ LOCAL_REPO="$HOME/.claude/workspace-cache/gitlab/$(echo $GITLAB_PROJECT_PATH | s
 if [[ ! -d "$LOCAL_REPO/.git" ]]; then
   mkdir -p "$(dirname "$LOCAL_REPO")"
   no_proxy="$GITLAB_HOST" git clone \
-    "http://oauth2:${GITLAB_TOKEN}@${GITLAB_HOST}/${GITLAB_PROJECT_PATH}.git" \
+    "https://oauth2:${GITLAB_TOKEN}@${GITLAB_HOST}/${GITLAB_PROJECT_PATH}.git" \
     "$LOCAL_REPO"
 else
   (cd "$LOCAL_REPO" && no_proxy="$GITLAB_HOST" git pull --ff-only)
@@ -395,7 +466,8 @@ fi
 
 ```bash
 WS_DIR="$LOCAL_REPO/$WS_NAME"
-rm -rf "$WS_DIR"
+[[ "$WS_DIR" == "$LOCAL_REPO/"* ]] || { echo "非法 workspace 路径"; exit 1; }
+rm -rf -- "$WS_DIR"
 mkdir -p "$WS_DIR"
 cp -r "$STAGE_DIR"/* "$WS_DIR/"
 
@@ -493,9 +565,13 @@ mc ls "$BUCKET_PATH" 2>/dev/null | awk '{print $NF}' | sed 's|/$||'
 | MinIO bucket 不存在 | 验证失败,提示先去 MinIO 创建 bucket |
 | mc 未安装(minio 后端) | 报错退出,给出安装命令 |
 | detect-projects 返回空 | 按纯讨论模式继续 |
+| push 时项目存在未提交改动 | 直接报错,要求用户先 commit/push |
+| push 时项目没有 upstream | 直接报错,要求用户先 `git push -u` |
+| push 时项目与 upstream 不同步 | 直接报错,要求用户先同步代码 |
 | 项目路径未映射(pull 时) | 交互询问用户,写入 local-paths.json |
-| patch 冲突 | 使用 `git apply --3way`,失败不中断其他项目 |
-| 本地有未提交改动 | 备份到 `~/.claude/workspace-backup/<时间戳>/` |
+| 记录的 `head` 在目标设备不存在 | 跳过该项目并报错 |
+| pull 时本地有未提交改动 | 跳过该项目并报错,不要覆盖当前工作区 |
+| workspace 名称非法 | 立即报错,不要做任何删除/覆盖操作 |
 
 ---
 

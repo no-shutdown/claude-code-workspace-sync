@@ -1,73 +1,142 @@
 #!/bin/bash
 # detect-projects.sh <jsonl-path>
 # 从 Claude Code session jsonl 中提取所有涉及的 git 项目
-# 输出 JSON 数组:[{"name","path","remote","branch","head","changed_files_count"}]
+# 输出 JSON 数组:[{"name","path","remote","branch","head","touched_files"}]
 
-set -e
+set -euo pipefail
 
-JSONL="$1"
-if [[ ! -f "$JSONL" ]]; then
+JSONL="${1:-}"
+if [[ -z "$JSONL" || ! -f "$JSONL" ]]; then
   echo "[]"
   exit 0
 fi
 
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$TMP_DIR"' EXIT
+
+FILE_PATHS="$TMP_DIR/file-paths.txt"
+DIR_HINTS="$TMP_DIR/dir-hints.txt"
+ROOT_DIRS="$TMP_DIR/root-dirs.txt"
+ROOT_HITS="$TMP_DIR/root-hits.txt"
+
+: > "$FILE_PATHS"
+: > "$DIR_HINTS"
+: > "$ROOT_DIRS"
+: > "$ROOT_HITS"
+
+extract_json_values() {
+  local key="$1"
+  grep -oE "\"$key\":\"([^\"\\\\]|\\\\.)*\"" "$JSONL" 2>/dev/null | \
+    sed -E "s/^\"$key\":\"//; s/\"$//" | \
+    sed 's/\\\\/\\/g; s/\\"/"/g' | \
+    sort -u || true
+}
+
 # 把 Windows 路径转成 Git Bash 能识别的形式
 to_unix_path() {
   local p="$1"
-  # C:\Users\foo -> /c/Users/foo
   if [[ "$p" =~ ^[A-Za-z]: ]]; then
     local drive="${p:0:1}"
     local rest="${p:2}"
+    local lower_drive
+    local gitbash_path
+    local wsl_path
+
     rest="${rest//\\//}"
-    echo "/${drive,,}${rest}"
+    lower_drive="$(printf '%s' "$drive" | tr '[:upper:]' '[:lower:]')"
+    gitbash_path="/${lower_drive}${rest}"
+    wsl_path="/mnt/${lower_drive}${rest}"
+
+    if [[ -e "$gitbash_path" || -d "$(dirname "$gitbash_path")" ]]; then
+      printf '%s\n' "$gitbash_path"
+    elif [[ -e "$wsl_path" || -d "$(dirname "$wsl_path")" ]]; then
+      printf '%s\n' "$wsl_path"
+    else
+      printf '%s\n' "$gitbash_path"
+    fi
   else
-    echo "${p//\\//}"
+    printf '%s\n' "${p//\\//}"
   fi
 }
 
-# 提取所有 file_path 值(Read/Edit/Write 工具),以及 Bash 工具的 cwd
-# jsonl 里路径被 JSON 转义:C:\\Users\\foo  -> 原始值 C:\Users\foo
-raw_paths=$(grep -oE '"file_path":"([^"\\]|\\.)*"' "$JSONL" 2>/dev/null | \
-  sed -E 's/^"file_path":"//; s/"$//' | \
-  sed 's/\\\\/\\/g; s/\\"/"/g' | \
-  sort -u || true)
+json_escape() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
 
-# 遍历路径,找到每个文件对应的 git root
-declare -A git_roots         # key: unix_path, value: original(windows)_path
-declare -A git_roots_count   # key: unix_path, value: file count
+find_git_root() {
+  local path="$1"
+  local dir
 
-while IFS= read -r raw; do
-  [[ -z "$raw" ]] && continue
-  unix=$(to_unix_path "$raw")
-  # 从文件所在目录向上找 .git
-  dir="$(dirname "$unix")"
+  if [[ -d "$path" ]]; then
+    dir="$path"
+  else
+    dir="$(dirname "$path")"
+  fi
+
   while [[ "$dir" != "/" && "$dir" != "." && -n "$dir" ]]; do
     if [[ -d "$dir/.git" ]]; then
-      git_roots["$dir"]="$dir"
-      git_roots_count["$dir"]=$(( ${git_roots_count["$dir"]:-0} + 1 ))
-      break
+      printf '%s\n' "$dir"
+      return 0
     fi
     parent="$(dirname "$dir")"
     [[ "$parent" == "$dir" ]] && break
     dir="$parent"
   done
-done <<< "$raw_paths"
 
-# 输出 JSON 数组
+  return 1
+}
+
+extract_json_values "file_path" > "$FILE_PATHS"
+{
+  extract_json_values "cwd"
+  extract_json_values "workdir"
+} | sort -u > "$DIR_HINTS"
+
+while IFS= read -r raw; do
+  [[ -z "$raw" ]] && continue
+  unix_path="$(to_unix_path "$raw")"
+  root="$(find_git_root "$unix_path" || true)"
+  [[ -z "$root" ]] && continue
+  printf '%s\n' "$root" >> "$ROOT_DIRS"
+  printf '%s\n' "$root" >> "$ROOT_HITS"
+done < "$FILE_PATHS"
+
+while IFS= read -r raw; do
+  [[ -z "$raw" ]] && continue
+  unix_path="$(to_unix_path "$raw")"
+  root="$(find_git_root "$unix_path" || true)"
+  [[ -z "$root" ]] && continue
+  printf '%s\n' "$root" >> "$ROOT_DIRS"
+done < "$DIR_HINTS"
+
+if [[ ! -s "$ROOT_DIRS" ]]; then
+  echo "[]"
+  exit 0
+fi
+
 echo -n "["
 first=1
-for root in "${!git_roots[@]}"; do
+while IFS= read -r root; do
+  [[ -z "$root" ]] && continue
   [[ $first -eq 0 ]] && echo -n ","
   first=0
+
   name="$(basename "$root")"
-  count="${git_roots_count["$root"]}"
+  count="$(grep -Fxc "$root" "$ROOT_HITS" 2>/dev/null || true)"
+  [[ -z "$count" ]] && count=0
+
   (
     cd "$root" 2>/dev/null || exit 0
-    remote=$(git config --get remote.origin.url 2>/dev/null || echo "")
-    branch=$(git symbolic-ref --short HEAD 2>/dev/null || git rev-parse --short HEAD 2>/dev/null || echo "")
-    head=$(git rev-parse HEAD 2>/dev/null || echo "")
+    remote="$(git config --get remote.origin.url 2>/dev/null || echo "")"
+    branch="$(git symbolic-ref --short HEAD 2>/dev/null || git rev-parse --short HEAD 2>/dev/null || echo "")"
+    head="$(git rev-parse HEAD 2>/dev/null || echo "")"
     printf '{"name":"%s","path":"%s","remote":"%s","branch":"%s","head":"%s","touched_files":%s}' \
-      "$name" "$root" "$remote" "$branch" "$head" "$count"
+      "$(json_escape "$name")" \
+      "$(json_escape "$root")" \
+      "$(json_escape "$remote")" \
+      "$(json_escape "$branch")" \
+      "$(json_escape "$head")" \
+      "$count"
   )
-done
+done < <(sort -u "$ROOT_DIRS")
 echo "]"
