@@ -1,0 +1,19 @@
+{
+  "backend": null,
+  "gitlab": {
+    "host": "gitlab.com",
+    "token": "<your-personal-access-token>",
+    "project_path": "<namespace>/<repo-name>",
+    "branch": "main"
+  },
+  "minio": {
+    "endpoint": "https://<your-minio-endpoint>",
+    "access_key": "<your-access-key>",
+    "secret_key": "<your-secret-key>",
+    "bucket": "<your-bucket-name>",
+    "prefix": "workspaces/",
+    "mc_alias": "claude-workspace-sync"
+  },
+  "cache_dir": "~/.claude/workspace-cache",
+  "local_paths_file": "~/.claude/skills/workspace-sync/local-paths.json"
+}
