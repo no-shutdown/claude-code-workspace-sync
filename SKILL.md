@@ -231,7 +231,17 @@ validate_ws_name() {
   local name="$1"
   [[ -n "$name" ]] || return 1
   [[ "$name" != "." && "$name" != ".." ]] || return 1
-  [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]]
+  [[ "$name" != *[[:space:]]* ]] || return 1
+  [[ "$name" != *[[:cntrl:]]* ]] || return 1
+  [[ "$name" != *"/"* ]] || return 1
+  [[ "$name" != *"\\"* ]] || return 1
+  [[ "$name" != *"<"* ]] || return 1
+  [[ "$name" != *">"* ]] || return 1
+  [[ "$name" != *":"* ]] || return 1
+  [[ "$name" != *"\""* ]] || return 1
+  [[ "$name" != *"|"* ]] || return 1
+  [[ "$name" != *[?]* ]] || return 1
+  [[ "$name" != *[*]* ]] || return 1
 }
 ```
 
@@ -393,7 +403,8 @@ Push 确认通过后先校验工作空间名称:
 ```bash
 validate_ws_name "$WS_NAME" || {
   echo "❌ 非法工作空间名称: $WS_NAME"
-  echo "   仅允许字母、数字、点、下划线、短横线"
+  echo "   支持中文命名"
+  echo "   不允许空白、路径分隔符、控制字符或 Windows 非法文件名字符"
   exit 1
 }
 ```
@@ -558,7 +569,8 @@ Claude 必须明确提示用户:
 ```bash
 validate_ws_name "$WS_NAME" || {
   echo "❌ 非法工作空间名称: $WS_NAME"
-  echo "   仅允许字母、数字、点、下划线、短横线"
+  echo "   支持中文命名"
+  echo "   不允许空白、路径分隔符、控制字符或 Windows 非法文件名字符"
   exit 1
 }
 
