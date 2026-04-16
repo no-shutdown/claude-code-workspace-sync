@@ -11,6 +11,7 @@ REMOTE_URL=""
 REPO_NAME=""
 HEAD_COMMIT=""
 WRITE_MAPPING=1
+SCAN_DEPTH=3
 declare -a EXTRA_SCAN_ROOTS=()
 
 usage() {
@@ -26,6 +27,7 @@ Options:
   --config <path>          Override config.json path.
   --local-paths <path>     Override local-paths.json path.
   --scan-root <path>       Add a scan root. Repeatable.
+  --max-depth <n>          Subdirectory search depth when scanning for repos (default: 3).
   --no-write-mapping       Do not persist unique matches back to local-paths.json.
   -h, --help               Show this help.
 EOF
@@ -81,6 +83,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --scan-root)
       EXTRA_SCAN_ROOTS+=("${2:-}")
+      shift 2
+      ;;
+    --max-depth)
+      SCAN_DEPTH="${2:-3}"
       shift 2
       ;;
     --no-write-mapping)
@@ -178,7 +184,7 @@ while IFS= read -r raw_root; do
         [[ -n "$git_marker" ]] || continue
         repo_root="$(ws_resolve_git_root "$(dirname "$git_marker")")"
         [[ -n "$repo_root" ]] && printf '%s\n' "$repo_root" >> "$REPO_ROOTS_FILE"
-      done < <(find "$unix_root" -maxdepth 3 \( -type d -name .git -o -type f -name .git \) -print 2>/dev/null)
+      done < <(find "$unix_root" -maxdepth "$SCAN_DEPTH" \( -type d -name .git -o -type f -name .git \) -print 2>/dev/null)
     fi
   fi
 done < "$SCAN_ROOTS_FILE"

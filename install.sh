@@ -38,6 +38,10 @@ copy_file() {
   local src="$1"
   local dest="$2"
 
+  [[ -f "$src" ]] || {
+    echo "Source file not found: $src" >&2
+    exit 1
+  }
   mkdir -p "$(dirname "$dest")"
   cp "$src" "$dest"
 }

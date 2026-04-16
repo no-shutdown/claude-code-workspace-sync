@@ -31,26 +31,6 @@ Options:
 EOF
 }
 
-emit_json_array() {
-  local file="$1"
-  local first=1
-  local item
-
-  echo -n "["
-  [[ -f "$file" ]] || {
-    echo -n "]"
-    return 0
-  }
-
-  while IFS= read -r item; do
-    [[ -n "$item" ]] || continue
-    [[ $first -eq 0 ]] && echo -n ","
-    first=0
-    printf '"%s"' "$(ws_json_escape "$item")"
-  done < "$file"
-
-  echo -n "]"
-}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -204,5 +184,5 @@ printf '{"status":"restored","skill":"%s","state":"%s","scope":"%s","project":"%
   "$(ws_json_escape "$PROJECT_NAME")" \
   "$(ws_json_escape "$(ws_to_host_path "$INPUT_DIR")")" \
   "$(ws_json_escape "$MAIN_ARTIFACT")"
-emit_json_array "$ARTIFACTS_FILE"
+ws_emit_json_string_array "$ARTIFACTS_FILE"
 echo "}"

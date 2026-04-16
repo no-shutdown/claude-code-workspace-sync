@@ -26,10 +26,47 @@ ROOT_HITS="$TMP_DIR/root-hits.txt"
 
 extract_json_values() {
   local key="$1"
-  grep -oE "\"$key\":\"([^\"\\\\]|\\\\.)*\"" "$JSONL" 2>/dev/null | \
-    sed -E "s/^\"$key\":\"//; s/\"$//" | \
-    sed 's/\\\\/\\/g; s/\\"/"/g' | \
-    sort -u || true
+
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$JSONL" "$key" <<'PY'
+import json
+import sys
+
+jsonl_path = sys.argv[1]
+key = sys.argv[2]
+seen = set()
+
+def walk(obj, depth=0):
+    if depth > 50:
+        return
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if k == key and isinstance(v, str):
+                if v not in seen:
+                    seen.add(v)
+                    print(v)
+            else:
+                walk(v, depth + 1)
+    elif isinstance(obj, list):
+        for item in obj:
+            walk(item, depth + 1)
+
+with open(jsonl_path, encoding="utf-8", errors="replace") as fh:
+    for line in fh:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            walk(json.loads(line))
+        except (json.JSONDecodeError, RecursionError):
+            pass
+PY
+  else
+    grep -oE "\"$key\":\"([^\"\\\\]|\\\\.)*\"" "$JSONL" 2>/dev/null | \
+      sed -E "s/^\"$key\":\"//; s/\"$//" | \
+      sed 's/\\\\/\\/g; s/\\"/"/g' | \
+      sort -u || true
+  fi
 }
 
 # 把 Windows 路径转成 Git Bash 能识别的形式

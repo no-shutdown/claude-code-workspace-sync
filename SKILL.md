@@ -897,10 +897,32 @@ fi
 
 ```bash
 WS_DIR="$LOCAL_REPO/$WS_NAME"
+
+# Step 6: 读取 staging 开始前的远端版本(用于后续乐观并发校验的基线)
 CURRENT_REMOTE_VERSION=0
 if [[ -f "$WS_DIR/manifest.json" ]]; then
   CURRENT_REMOTE_VERSION=$(python3 -c "import json; print(json.load(open(r'$WS_DIR/manifest.json')).get('version', 0) or 0)" 2>/dev/null || echo 0)
 fi
+
+# ... (Steps 7–10: 校验项目状态 / 生成 summary.md + manifest.json / 导出 skill states) ...
+
+# Step 11: 上传前再 pull 一次,重新读取远端版本做乐观并发校验
+(cd "$LOCAL_REPO" && no_proxy="$GITLAB_HOST" git pull --ff-only 2>/dev/null || true)
+LATEST_REMOTE_VERSION=0
+if [[ -f "$WS_DIR/manifest.json" ]]; then
+  LATEST_REMOTE_VERSION=$(python3 -c "import json; print(json.load(open(r'$WS_DIR/manifest.json')).get('version', 0) or 0)" 2>/dev/null || echo 0)
+fi
+
+if [[ "$LATEST_REMOTE_VERSION" != "$CURRENT_REMOTE_VERSION" ]]; then
+  echo "⚠ 并发冲突: 你本地基于版本 v${CURRENT_REMOTE_VERSION},当前远端已是 v${LATEST_REMOTE_VERSION}"
+  echo "  你计划提交的新版本原本是 v$((CURRENT_REMOTE_VERSION + 1))"
+  echo "  如果继续,将基于最新远端版本提交 v$((LATEST_REMOTE_VERSION + 1))"
+  # 询问用户是否继续,如果继续则重置版本基线
+  # 如果用户取消则 exit 0
+  CURRENT_REMOTE_VERSION=$LATEST_REMOTE_VERSION
+fi
+NEXT_VERSION=$((CURRENT_REMOTE_VERSION + 1))
+# 重写 manifest 中的 version / previous_version 字段后再进行文件覆盖
 
 [[ "$WS_DIR" == "$LOCAL_REPO/"* ]] || { echo "非法 workspace 路径"; exit 1; }
 rm -rf -- "$WS_DIR"
@@ -912,7 +934,7 @@ cp -r "$STAGE_DIR"/* "$WS_DIR/"
   git checkout "$GITLAB_BRANCH" 2>/dev/null || git checkout -b "$GITLAB_BRANCH"
   git add "$WS_NAME"
   git -c user.email="workspace-sync@local" -c user.name="workspace-sync" \
-      commit -m "workspace: update $WS_NAME from $(hostname)" || echo "nothing to commit"
+      commit -m "workspace: update $WS_NAME v${NEXT_VERSION} from $(hostname)" || echo "nothing to commit"
   no_proxy="$GITLAB_HOST" git push origin "$GITLAB_BRANCH"
 )
 ```
@@ -987,9 +1009,26 @@ BUCKET_PATH="$MC_ALIAS/$MINIO_BUCKET/$MINIO_PREFIX"
 ## Push
 
 ```bash
-# 读取当前远端版本
+# Step 6: 读取 staging 开始前的远端版本(用于后续乐观并发校验的基线)
 CURRENT_REMOTE_VERSION=$(mc cat "$BUCKET_PATH$WS_NAME/manifest.json" 2>/dev/null | \
   python3 -c "import json,sys; print(json.load(sys.stdin).get('version', 0) or 0)" 2>/dev/null || echo 0)
+
+# ... (Steps 7–10: 校验项目状态 / 生成 summary.md + manifest.json / 导出 skill states) ...
+
+# Step 11: 上传前重新读取远端版本做乐观并发校验
+LATEST_REMOTE_VERSION=$(mc cat "$BUCKET_PATH$WS_NAME/manifest.json" 2>/dev/null | \
+  python3 -c "import json,sys; print(json.load(sys.stdin).get('version', 0) or 0)" 2>/dev/null || echo 0)
+
+if [[ "$LATEST_REMOTE_VERSION" != "$CURRENT_REMOTE_VERSION" ]]; then
+  echo "⚠ 并发冲突: 你本地基于版本 v${CURRENT_REMOTE_VERSION},当前远端已是 v${LATEST_REMOTE_VERSION}"
+  echo "  你计划提交的新版本原本是 v$((CURRENT_REMOTE_VERSION + 1))"
+  echo "  如果继续,将基于最新远端版本提交 v$((LATEST_REMOTE_VERSION + 1))"
+  # 询问用户是否继续,如果继续则重置版本基线
+  # 如果用户取消则 exit 0
+  CURRENT_REMOTE_VERSION=$LATEST_REMOTE_VERSION
+fi
+NEXT_VERSION=$((CURRENT_REMOTE_VERSION + 1))
+# 重写 manifest 中的 version / previous_version 字段后再进行文件覆盖
 
 # 先删除云端已有的同名工作空间(覆盖)
 mc rm --recursive --force "$BUCKET_PATH$WS_NAME/" 2>/dev/null

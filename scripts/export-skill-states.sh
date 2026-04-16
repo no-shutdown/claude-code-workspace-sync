@@ -29,26 +29,6 @@ Options:
 EOF
 }
 
-emit_json_lines_array() {
-  local file="$1"
-  local first=1
-  local line
-
-  echo -n "["
-  [[ -f "$file" ]] || {
-    echo -n "]"
-    return 0
-  }
-
-  while IFS= read -r line; do
-    [[ -n "$line" ]] || continue
-    [[ $first -eq 0 ]] && echo -n ","
-    first=0
-    printf '%s' "$line"
-  done < "$file"
-
-  echo -n "]"
-}
 
 state_selected() {
   local state_name="$1"
@@ -259,5 +239,5 @@ while IFS=$'\t' read -r state_name state_scope state_portability; do
 done < <(ws_list_contract_states "$CONTRACT_PATH" "portable")
 
 printf '{"skill":"%s","results":' "$(ws_json_escape "$SKILL_NAME")"
-emit_json_lines_array "$RESULTS_FILE"
+ws_emit_json_lines_array "$RESULTS_FILE"
 echo "}"

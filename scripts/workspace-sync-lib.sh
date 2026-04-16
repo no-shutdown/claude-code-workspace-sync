@@ -698,3 +698,39 @@ fs.writeFileSync(resolved, JSON.stringify(data, null, 2) + "\n", "utf8");
     ws_die "python3 or node is required to update local-paths.json"
   fi
 }
+
+# 将 JSONL 文件中每行作为原始 JSON 值输出为数组(元素已经是 JSON 对象/值)
+ws_emit_json_lines_array() {
+  local file="$1"
+  local first=1
+  local line
+
+  printf '['
+  if [[ -f "$file" ]]; then
+    while IFS= read -r line; do
+      [[ -n "$line" ]] || continue
+      [[ $first -eq 0 ]] && printf ','
+      first=0
+      printf '%s' "$line"
+    done < "$file"
+  fi
+  printf ']'
+}
+
+# 将文本文件中每行作为 JSON 字符串输出为数组(自动转义)
+ws_emit_json_string_array() {
+  local file="$1"
+  local first=1
+  local item
+
+  printf '['
+  if [[ -f "$file" ]]; then
+    while IFS= read -r item; do
+      [[ -n "$item" ]] || continue
+      [[ $first -eq 0 ]] && printf ','
+      first=0
+      printf '"%s"' "$(ws_json_escape "$item")"
+    done < "$file"
+  fi
+  printf ']'
+}
