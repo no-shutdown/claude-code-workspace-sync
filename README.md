@@ -202,12 +202,20 @@ cd workspace-sync
 workspace-sync/
 ├── SKILL.md
 ├── README.md
+├── examples/
+│   └── sdd/
+│       ├── workspace-sync.contract.json
+│       └── scripts/
 ├── install.sh
 ├── uninstall.sh
 ├── docs/
 │   └── skill-state-contract.md
 ├── scripts/
 │   └── detect-projects.sh
+│   └── export-skill-states.sh
+│   └── import-skill-states.sh
+│   └── run-skill-state-export.sh
+│   └── run-skill-state-import.sh
 └── templates/
     ├── config.json.example
     └── workspace-sync.contract.example.json
@@ -216,7 +224,10 @@ workspace-sync/
 说明：
 
 - `SKILL.md`：Claude 实际遵循的 skill 定义
+- `examples/sdd/`：一个可直接参考的 skill-state-contract 实例
 - `scripts/`：skill 运行时会用到的辅助脚本
+- `scripts/export-skill-states.sh` / `scripts/import-skill-states.sh`：单个 skill 的 state 导出/导入编排器
+- `scripts/run-skill-state-export.sh` / `scripts/run-skill-state-import.sh`：按 contract 执行 skill state 导出/导入的通用执行器
 - `templates/`：安装时使用的模板文件
 - `install.sh`：安装脚本
 - `uninstall.sh`：卸载脚本
@@ -379,6 +390,13 @@ workspace-sync/
 完整说明：
 
 [`docs/skill-state-contract.md`](./docs/skill-state-contract.md)
+
+实际例子：
+[`examples/sdd/workspace-sync.contract.json`](./examples/sdd/workspace-sync.contract.json)
+[`scripts/export-skill-states.sh`](./scripts/export-skill-states.sh)
+[`scripts/import-skill-states.sh`](./scripts/import-skill-states.sh)
+[`scripts/run-skill-state-export.sh`](./scripts/run-skill-state-export.sh)
+[`scripts/run-skill-state-import.sh`](./scripts/run-skill-state-import.sh)
 
 当前规则是：
 

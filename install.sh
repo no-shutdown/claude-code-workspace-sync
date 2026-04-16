@@ -42,6 +42,27 @@ copy_file() {
   cp "$src" "$dest"
 }
 
+normalize_target_path() {
+  local path="$1"
+  local drive
+  local rest
+  local lower_drive
+
+  case "$path" in
+    [A-Za-z]:*)
+      drive="${path:0:1}"
+      rest="${path:2}"
+      rest="${rest//\\//}"
+      [[ "$rest" == /* ]] || rest="/$rest"
+      lower_drive="$(printf '%s' "$drive" | tr '[:upper:]' '[:lower:]')"
+      printf '/mnt/%s%s\n' "$lower_drive" "$rest"
+      ;;
+    *)
+      printf '%s\n' "$path"
+      ;;
+  esac
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --target)
@@ -68,10 +89,12 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+TARGET_DIR="$(normalize_target_path "$TARGET_DIR")"
 assert_safe_target "$TARGET_DIR"
 
 mkdir -p "$TARGET_DIR/scripts"
 mkdir -p "$TARGET_DIR/docs"
+mkdir -p "$TARGET_DIR/examples/sdd/scripts"
 
 copy_file "$SCRIPT_DIR/SKILL.md" "$TARGET_DIR/SKILL.md"
 copy_file "$SCRIPT_DIR/README.md" "$TARGET_DIR/README.md"
@@ -80,14 +103,27 @@ copy_file "$SCRIPT_DIR/uninstall.sh" "$TARGET_DIR/uninstall.sh"
 copy_file "$SCRIPT_DIR/templates/config.json.example" "$TARGET_DIR/config.json.example"
 copy_file "$SCRIPT_DIR/templates/workspace-sync.contract.example.json" "$TARGET_DIR/workspace-sync.contract.example.json"
 copy_file "$SCRIPT_DIR/scripts/detect-projects.sh" "$TARGET_DIR/scripts/detect-projects.sh"
+copy_file "$SCRIPT_DIR/scripts/export-skill-states.sh" "$TARGET_DIR/scripts/export-skill-states.sh"
+copy_file "$SCRIPT_DIR/scripts/import-skill-states.sh" "$TARGET_DIR/scripts/import-skill-states.sh"
 copy_file "$SCRIPT_DIR/scripts/resolve-project-path.sh" "$TARGET_DIR/scripts/resolve-project-path.sh"
+copy_file "$SCRIPT_DIR/scripts/run-skill-state-export.sh" "$TARGET_DIR/scripts/run-skill-state-export.sh"
+copy_file "$SCRIPT_DIR/scripts/run-skill-state-import.sh" "$TARGET_DIR/scripts/run-skill-state-import.sh"
 copy_file "$SCRIPT_DIR/scripts/set-local-path.sh" "$TARGET_DIR/scripts/set-local-path.sh"
 copy_file "$SCRIPT_DIR/scripts/workspace-sync-lib.sh" "$TARGET_DIR/scripts/workspace-sync-lib.sh"
 copy_file "$SCRIPT_DIR/docs/skill-state-contract.md" "$TARGET_DIR/docs/skill-state-contract.md"
+copy_file "$SCRIPT_DIR/examples/sdd/workspace-sync.contract.json" "$TARGET_DIR/examples/sdd/workspace-sync.contract.json"
+copy_file "$SCRIPT_DIR/examples/sdd/scripts/export-workspace-state.sh" "$TARGET_DIR/examples/sdd/scripts/export-workspace-state.sh"
+copy_file "$SCRIPT_DIR/examples/sdd/scripts/import-workspace-state.sh" "$TARGET_DIR/examples/sdd/scripts/import-workspace-state.sh"
 
 chmod +x "$TARGET_DIR/scripts/detect-projects.sh"
+chmod +x "$TARGET_DIR/scripts/export-skill-states.sh"
+chmod +x "$TARGET_DIR/scripts/import-skill-states.sh"
 chmod +x "$TARGET_DIR/scripts/resolve-project-path.sh"
+chmod +x "$TARGET_DIR/scripts/run-skill-state-export.sh"
+chmod +x "$TARGET_DIR/scripts/run-skill-state-import.sh"
 chmod +x "$TARGET_DIR/scripts/set-local-path.sh"
+chmod +x "$TARGET_DIR/examples/sdd/scripts/export-workspace-state.sh"
+chmod +x "$TARGET_DIR/examples/sdd/scripts/import-workspace-state.sh"
 chmod +x "$TARGET_DIR/install.sh" "$TARGET_DIR/uninstall.sh"
 
 if [[ "$INIT_CONFIG" == "1" && ! -f "$TARGET_DIR/config.json" ]]; then
@@ -103,8 +139,13 @@ Files:
   $TARGET_DIR/install.sh
   $TARGET_DIR/uninstall.sh
   $TARGET_DIR/scripts/detect-projects.sh
+  $TARGET_DIR/scripts/export-skill-states.sh
+  $TARGET_DIR/scripts/import-skill-states.sh
   $TARGET_DIR/scripts/resolve-project-path.sh
+  $TARGET_DIR/scripts/run-skill-state-export.sh
+  $TARGET_DIR/scripts/run-skill-state-import.sh
   $TARGET_DIR/scripts/set-local-path.sh
+  $TARGET_DIR/examples/sdd/workspace-sync.contract.json
   $TARGET_DIR/config.json.example
   $TARGET_DIR/workspace-sync.contract.example.json
 

@@ -219,7 +219,11 @@ gitlab.yc.com/ukon/shanks-manage
       "portability": "portable",
       "project": "shanks-manage",
       "status": "exported",
-      "artifact": "skill-states/sdd/shanks-manage-project-state.tgz"
+      "artifact": "skill-states/sdd/shanks-manage-project-state/state.tgz",
+      "artifacts": [
+        "skill-states/sdd/shanks-manage-project-state/manifest.json",
+        "skill-states/sdd/shanks-manage-project-state/state.tgz"
+      ]
     }
   ]
 }
@@ -230,6 +234,8 @@ gitlab.yc.com/ukon/shanks-manage
 - `status=skipped`: 检测到该 skill,但当前环境无法导出
 - `status=not_exported`: 当前 workspace 没有启用该 skill 的状态同步
 - `status=deferred`: 导出产物存在,但当前环境暂不导入
+- `artifact`: 主归档文件路径,用于快速定位主要产物
+- `artifacts`: 可选,完整列出该 state 对应的所有文件
 
 版本字段:
 - `version`: 当前 workspace 的远端版本号,每次 push 递增
@@ -554,7 +560,62 @@ for each detected project:
 2. 读取 `workspace-sync.contract.json`
 3. 遍历其中 `states`
 4. 只对 `portability=portable` 的状态调用 `export_command`
-5. 把结果写入 `$STAGE_DIR/skill-states/<skill-name>/`
+5. 为每个 state 准备独立输出目录
+6. 按 contract 文档中的推荐参数调用 `export_command`
+7. 把导出结果写入 `$STAGE_DIR/skill-states/` 和 workspace `manifest.json`
+
+如果本仓库提供了通用执行器,优先使用:
+- `scripts/run-skill-state-export.sh`
+- 如果要一次导出单个 skill 的全部 portable states,优先使用:
+  - `scripts/export-skill-states.sh`
+
+推荐输出目录:
+- `project` 作用域:
+  - `$STAGE_DIR/skill-states/<skill-name>/<project-name>-<state-name>/`
+- `global` 作用域:
+  - `$STAGE_DIR/skill-states/<skill-name>/global-<state-name>/`
+
+推荐调用方式:
+```bash
+"$EXPORT_COMMAND" \
+  --workspace-name "$WS_NAME" \
+  --state-name "$STATE_NAME" \
+  --scope "$STATE_SCOPE" \
+  --project-name "$PROJECT_NAME" \
+  --project-path "$PROJECT_PATH" \
+  --output-dir "$STATE_OUTPUT_DIR"
+```
+
+调用约束:
+- `scope=global` 时不传 `--project-name` / `--project-path`
+- `export_command` 成功时退出码必须是 `0`
+- `export_command` 失败时,`workspace-sync` 只记录失败,不猜 skill 内部目录
+
+推荐输出结构:
+```text
+$STATE_OUTPUT_DIR/
+├── manifest.json
+└── state.tgz
+```
+
+其中 `manifest.json` 推荐至少包含:
+```json
+{
+  "skill": "sdd",
+  "state": "project-state",
+  "scope": "project",
+  "project": "shanks-manage",
+  "format_version": 1,
+  "artifacts": [
+    "state.tgz"
+  ]
+}
+```
+
+写入 workspace `manifest.json` 时:
+- `artifact` 写主归档路径,通常指向 `state.tgz`
+- `artifacts` 可选写完整文件列表
+- `status=exported` 只在 `export_command` 成功且产物存在时记录
 
 导出约束:
 - `pid`、`lock`、`tmp`、daemon 状态、设备绑定信息不得标记为 `portable`
@@ -709,7 +770,36 @@ pull 的汇报必须分两层:
 - 找到对应 skill 的安装目录
 - 读取其 `workspace-sync.contract.json`
 - 找到匹配的 `state`
-- 如果存在 `import_command`,则执行导入
+- 如果存在 `import_command`,则按约定参数执行导入
+
+如果本仓库提供了通用执行器,优先使用:
+- `scripts/run-skill-state-import.sh`
+- 如果要一次恢复单个 skill 在 manifest 中的全部状态,优先使用:
+  - `scripts/import-skill-states.sh`
+
+推荐调用方式:
+```bash
+"$IMPORT_COMMAND" \
+  --workspace-name "$WS_NAME" \
+  --state-name "$STATE_NAME" \
+  --scope "$STATE_SCOPE" \
+  --project-name "$PROJECT_NAME" \
+  --project-path "$PROJECT_PATH" \
+  --input-dir "$STATE_INPUT_DIR"
+```
+
+调用约束:
+- `scope=global` 时不传 `--project-name` / `--project-path`
+- `STATE_INPUT_DIR` 指向该 state 在 staging 目录中的导出目录
+- 如果 `artifacts` 存在,优先按 `artifacts` 校验文件完整性
+- 如果只有 `artifact`,至少要校验主归档文件存在
+- 不要跳过 contract 直接按文件名猜测导入逻辑
+
+导入前检查:
+- skill 已安装
+- contract 存在且 `contract_version` 可识别
+- `state` 在 contract 中存在且 `portability=portable`
+- `input-dir` 存在
 
 恢复规则:
 - skill 未安装 → `deferred`

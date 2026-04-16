@@ -1,19 +1,19 @@
 {
   "contract_version": 1,
-  "skill": "example-skill",
-  "description": "同步项目工作现场，不同步本机缓存和运行态",
+  "skill": "sdd",
+  "description": "同步 SDD 项目工作现场，不同步本机 cache 和 daemon 状态",
   "states": [
     {
       "name": "project-state",
-      "description": "项目级工作现场",
+      "description": "项目内的 spec 和当前任务状态",
       "scope": "project",
       "portability": "portable",
       "export_command": "./scripts/export-workspace-state.sh",
       "import_command": "./scripts/import-workspace-state.sh"
     },
     {
-      "name": "daemon-cache",
-      "description": "本机缓存和运行态",
+      "name": "daemon-runtime",
+      "description": "本机 daemon、锁和缓存",
       "scope": "global",
       "portability": "nonportable"
     }

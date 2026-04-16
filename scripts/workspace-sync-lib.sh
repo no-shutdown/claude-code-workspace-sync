@@ -104,6 +104,16 @@ ws_json_escape() {
   printf '%s' "${1:-}" | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
 
+ws_trim_quotes() {
+  local value="${1:-}"
+  value="${value%$'\r'}"
+  value="${value#\"}"
+  value="${value%\"}"
+  value="${value#\'}"
+  value="${value%\'}"
+  printf '%s\n' "$value"
+}
+
 ws_resolve_git_root() {
   local path="${1:-}"
   git -C "$path" rev-parse --show-toplevel 2>/dev/null || true
@@ -156,6 +166,42 @@ ws_json_with_node() {
   node - "$@" <<NODE
 $script
 NODE
+}
+
+ws_get_json_string() {
+  local file="$1"
+  local key="$2"
+
+  [[ -f "$file" ]] || return 0
+
+  if ws_command_exists python3; then
+    ws_json_with_python '
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1]).expanduser()
+key = sys.argv[2]
+with path.open(encoding="utf-8") as handle:
+    data = json.load(handle)
+value = data.get(key, "")
+if value is None:
+    print("")
+else:
+    print(str(value))
+' "$file" "$key"
+  elif ws_command_exists node; then
+    ws_json_with_node '
+const fs = require("fs");
+const path = require("path");
+
+const file = process.argv[2].replace(/^~(?=$|[\\/])/, process.env.HOME || "");
+const key = process.argv[3];
+const data = JSON.parse(fs.readFileSync(path.resolve(file), "utf8"));
+const value = data[key];
+console.log(value == null ? "" : String(value));
+' "$file" "$key"
+  fi
 }
 
 ws_get_config_string() {
@@ -238,6 +284,272 @@ for (const item of value) {
 }
 ' "$file" "$key"
   fi
+}
+
+ws_get_contract_state_string() {
+  local file="$1"
+  local state_name="$2"
+  local key="$3"
+
+  [[ -f "$file" ]] || return 0
+
+  if ws_command_exists python3; then
+    ws_json_with_python '
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1]).expanduser()
+state_name = sys.argv[2]
+key = sys.argv[3]
+with path.open(encoding="utf-8") as handle:
+    data = json.load(handle)
+states = data.get("states") or []
+for state in states:
+    if isinstance(state, dict) and state.get("name") == state_name:
+        value = state.get(key, "")
+        print("" if value is None else str(value))
+        break
+else:
+    print("")
+' "$file" "$state_name" "$key"
+  elif ws_command_exists node; then
+    ws_json_with_node '
+const fs = require("fs");
+const path = require("path");
+
+const file = process.argv[2].replace(/^~(?=$|[\\/])/, process.env.HOME || "");
+const stateName = process.argv[3];
+const key = process.argv[4];
+const data = JSON.parse(fs.readFileSync(path.resolve(file), "utf8"));
+const states = Array.isArray(data.states) ? data.states : [];
+const state = states.find((item) => item && item.name === stateName) || {};
+const value = state[key];
+console.log(value == null ? "" : String(value));
+' "$file" "$state_name" "$key"
+  fi
+}
+
+ws_list_contract_states() {
+  local file="$1"
+  local portability_filter="${2:-}"
+
+  [[ -f "$file" ]] || return 0
+
+  if ws_command_exists python3; then
+    ws_json_with_python '
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1]).expanduser()
+portability_filter = sys.argv[2]
+with path.open(encoding="utf-8") as handle:
+    data = json.load(handle)
+states = data.get("states") or []
+for state in states:
+    if not isinstance(state, dict):
+        continue
+    name = state.get("name")
+    scope = state.get("scope", "")
+    portability = state.get("portability", "")
+    if not isinstance(name, str) or not name:
+        continue
+    if portability_filter and portability != portability_filter:
+        continue
+    print(f"{name}\t{scope}\t{portability}")
+' "$file" "$portability_filter"
+  elif ws_command_exists node; then
+    ws_json_with_node '
+const fs = require("fs");
+const path = require("path");
+
+const file = process.argv[2].replace(/^~(?=$|[\\/])/, process.env.HOME || "");
+const portabilityFilter = process.argv[3];
+const data = JSON.parse(fs.readFileSync(path.resolve(file), "utf8"));
+const states = Array.isArray(data.states) ? data.states : [];
+for (const state of states) {
+  if (!state || typeof state.name !== "string" || !state.name) {
+    continue;
+  }
+  const portability = typeof state.portability === "string" ? state.portability : "";
+  if (portabilityFilter && portability !== portabilityFilter) {
+    continue;
+  }
+  const scope = typeof state.scope === "string" ? state.scope : "";
+  console.log(`${state.name}\t${scope}\t${portability}`);
+}
+' "$file" "$portability_filter"
+  fi
+}
+
+ws_list_manifest_skill_entries() {
+  local file="$1"
+  local skill_name="$2"
+
+  [[ -f "$file" ]] || return 0
+
+  if ws_command_exists python3; then
+    ws_json_with_python '
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1]).expanduser()
+skill_name = sys.argv[2]
+with path.open(encoding="utf-8") as handle:
+    data = json.load(handle)
+entries = data.get("skill_states") or []
+for entry in entries:
+    if not isinstance(entry, dict):
+        continue
+    if entry.get("skill") != skill_name:
+        continue
+    state = entry.get("state", "") or ""
+    scope = entry.get("scope", "") or ""
+    portability = entry.get("portability", "") or ""
+    project = entry.get("project", "") or ""
+    status = entry.get("status", "") or ""
+    artifact = entry.get("artifact", "") or ""
+    artifacts = entry.get("artifacts") or []
+    first_artifact = ""
+    if isinstance(artifacts, list):
+        for item in artifacts:
+            if isinstance(item, str) and item:
+                first_artifact = item
+                break
+    print(f"{state}\t{scope}\t{portability}\t{project}\t{status}\t{artifact}\t{first_artifact}")
+' "$file" "$skill_name"
+  elif ws_command_exists node; then
+    ws_json_with_node '
+const fs = require("fs");
+const path = require("path");
+
+const file = process.argv[2].replace(/^~(?=$|[\\/])/, process.env.HOME || "");
+const skillName = process.argv[3];
+const data = JSON.parse(fs.readFileSync(path.resolve(file), "utf8"));
+const entries = Array.isArray(data.skill_states) ? data.skill_states : [];
+for (const entry of entries) {
+  if (!entry || entry.skill !== skillName) {
+    continue;
+  }
+  const artifacts = Array.isArray(entry.artifacts) ? entry.artifacts : [];
+  const firstArtifact = artifacts.find((item) => typeof item === "string" && item) || "";
+  console.log([
+    entry.state || "",
+    entry.scope || "",
+    entry.portability || "",
+    entry.project || "",
+    entry.status || "",
+    entry.artifact || "",
+    firstArtifact
+  ].join("\t"));
+}
+' "$file" "$skill_name"
+  fi
+}
+
+ws_relative_dirname() {
+  local path="${1:-}"
+
+  case "$path" in
+    */*)
+      printf '%s\n' "${path%/*}"
+      ;;
+    *)
+      printf '.\n'
+      ;;
+  esac
+}
+
+ws_get_manifest_artifacts() {
+  local file="$1"
+
+  [[ -f "$file" ]] || return 0
+
+  if ws_command_exists python3; then
+    ws_json_with_python '
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1]).expanduser()
+with path.open(encoding="utf-8") as handle:
+    data = json.load(handle)
+value = data.get("artifacts") or []
+if isinstance(value, list):
+    for item in value:
+        if isinstance(item, str):
+            print(item)
+' "$file"
+  elif ws_command_exists node; then
+    ws_json_with_node '
+const fs = require("fs");
+const path = require("path");
+
+const file = process.argv[2].replace(/^~(?=$|[\\/])/, process.env.HOME || "");
+const data = JSON.parse(fs.readFileSync(path.resolve(file), "utf8"));
+const value = Array.isArray(data.artifacts) ? data.artifacts : [];
+for (const item of value) {
+  if (typeof item === "string") {
+    console.log(item);
+  }
+}
+' "$file"
+  fi
+}
+
+ws_resolve_command_spec() {
+  local base_dir="$1"
+  local command_spec
+
+  command_spec="$(ws_trim_quotes "${2:-}")"
+  [[ -n "$command_spec" ]] || return 0
+
+  if [[ "$command_spec" =~ [[:space:]] ]]; then
+    ws_die "Command spec must be a single executable path or command name: $command_spec"
+  fi
+
+  if [[ "$command_spec" =~ ^[A-Za-z]: || "$command_spec" == /* ]]; then
+    printf '%s\n' "$(ws_to_unix_path "$command_spec")"
+  elif [[ "$command_spec" == */* || "$command_spec" == ./* || "$command_spec" == ../* ]]; then
+    printf '%s\n' "$base_dir/$command_spec"
+  else
+    printf '%s\n' "$command_spec"
+  fi
+}
+
+ws_run_command_spec() {
+  local base_dir="$1"
+  local command_spec="$2"
+  shift 2
+
+  local resolved
+  resolved="$(ws_resolve_command_spec "$base_dir" "$command_spec")"
+  [[ -n "$resolved" ]] || ws_die "Empty command spec"
+
+  if [[ "$resolved" == */* || "$resolved" =~ ^[A-Za-z]: || "$resolved" == /* ]]; then
+    [[ -f "$resolved" ]] || ws_die "Command not found: $resolved"
+    if [[ -x "$resolved" ]]; then
+      "$resolved" "$@"
+    else
+      bash "$resolved" "$@"
+    fi
+  else
+    ws_command_exists "$resolved" || ws_die "Command not found in PATH: $resolved"
+    "$resolved" "$@"
+  fi
+}
+
+ws_list_relative_files() {
+  local dir="$1"
+
+  [[ -d "$dir" ]] || return 0
+
+  find "$dir" -type f -print 2>/dev/null | while IFS= read -r file; do
+    file="${file#"$dir"/}"
+    printf '%s\n' "$file"
+  done | sort
 }
 
 ws_get_local_mapping_path() {
