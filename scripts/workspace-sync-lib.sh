@@ -734,3 +734,97 @@ ws_emit_json_string_array() {
   fi
   printf ']'
 }
+
+# 读取 contract 中指定 state 的 sync_paths 列表，每行一条
+ws_get_contract_state_paths() {
+  local file="$1"
+  local state_name="$2"
+
+  [[ -f "$file" ]] || return 0
+
+  if ws_command_exists python3; then
+    ws_json_with_python '
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1]).expanduser()
+state_name = sys.argv[2]
+with path.open(encoding="utf-8") as handle:
+    data = json.load(handle)
+states = data.get("states") or []
+for state in states:
+    if isinstance(state, dict) and state.get("name") == state_name:
+        paths = state.get("sync_paths") or []
+        if isinstance(paths, list):
+            for item in paths:
+                if isinstance(item, str) and item:
+                    print(item)
+        break
+' "$file" "$state_name"
+  elif ws_command_exists node; then
+    ws_json_with_node '
+const fs = require("fs");
+const path = require("path");
+
+const file = process.argv[2].replace(/^~(?=$|[\\/])/, process.env.HOME || "");
+const stateName = process.argv[3];
+const data = JSON.parse(fs.readFileSync(path.resolve(file), "utf8"));
+const states = Array.isArray(data.states) ? data.states : [];
+const state = states.find((s) => s && s.name === stateName) || {};
+const paths = Array.isArray(state.sync_paths) ? state.sync_paths : [];
+for (const item of paths) {
+  if (typeof item === "string" && item) {
+    console.log(item);
+  }
+}
+' "$file" "$state_name"
+  fi
+}
+
+# 检查 contract 中 state name 是否有重复；重复名称打印到 stdout，无重复则静默
+ws_validate_contract_state_names() {
+  local file="$1"
+
+  [[ -f "$file" ]] || return 0
+
+  if ws_command_exists python3; then
+    ws_json_with_python '
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1]).expanduser()
+with path.open(encoding="utf-8") as handle:
+    data = json.load(handle)
+states = data.get("states") or []
+seen = set()
+for state in states:
+    if not isinstance(state, dict):
+        continue
+    name = state.get("name")
+    if not isinstance(name, str) or not name:
+        continue
+    if name in seen:
+        print(name)
+    seen.add(name)
+' "$file"
+  elif ws_command_exists node; then
+    ws_json_with_node '
+const fs = require("fs");
+const path = require("path");
+
+const file = process.argv[2].replace(/^~(?=$|[\\/])/, process.env.HOME || "");
+const data = JSON.parse(fs.readFileSync(path.resolve(file), "utf8"));
+const states = Array.isArray(data.states) ? data.states : [];
+const seen = new Set();
+for (const state of states) {
+  if (!state || typeof state.name !== "string" || !state.name) continue;
+  if (seen.has(state.name)) {
+    console.log(state.name);
+  }
+  seen.add(state.name);
+}
+' "$file"
+  fi
+}

@@ -17,7 +17,8 @@ usage() {
   cat <<'EOF'
 Usage: ./run-skill-state-import.sh --skill-dir <dir> --workspace-name <name> --state-name <name> --input-dir <dir> [options]
 
-Runs the import_command for one portable state declared in workspace-sync.contract.json.
+Imports one portable state declared in workspace-sync.contract.json.
+Supports two modes: sync_paths (built-in atomic extraction) or import_command (custom script).
 
 Options:
   --skill-dir <dir>        Required. Skill root directory.
@@ -119,7 +120,14 @@ PORTABILITY="$(ws_get_contract_state_string "$CONTRACT_PATH" "$STATE_NAME" "port
 [[ "$PORTABILITY" == "portable" ]] || ws_die "State is not portable: $STATE_NAME"
 
 IMPORT_COMMAND="$(ws_get_contract_state_string "$CONTRACT_PATH" "$STATE_NAME" "import_command")"
-[[ -n "$IMPORT_COMMAND" ]] || ws_die "Missing import_command for state: $STATE_NAME"
+HAS_SYNC_PATHS=0
+while IFS= read -r _sp; do
+  [[ -n "$_sp" ]] && { HAS_SYNC_PATHS=1; break; }
+done < <(ws_get_contract_state_paths "$CONTRACT_PATH" "$STATE_NAME")
+
+if [[ -z "$IMPORT_COMMAND" && "$HAS_SYNC_PATHS" -eq 0 ]]; then
+  ws_die "State '$STATE_NAME' requires either import_command or sync_paths in contract"
+fi
 
 if [[ "$STATE_SCOPE" == "project" ]]; then
   [[ -n "$PROJECT_NAME" ]] || ws_die "--project-name is required for project scope"
@@ -158,22 +166,34 @@ fi
 
 [[ -s "$ARTIFACTS_FILE" ]] || ws_die "No importable artifacts found in: $INPUT_DIR"
 
-CMD_ARGS=(
-  --workspace-name "$WORKSPACE_NAME"
-  --state-name "$STATE_NAME"
-  --scope "$STATE_SCOPE"
-  --input-dir "$INPUT_DIR"
-)
+if [[ -n "$IMPORT_COMMAND" ]]; then
+  # 自定义脚本模式：把脚本的 stdout 重定向到 stderr，保证本 runner 的 stdout 只输出 JSON
+  CMD_ARGS=(
+    --workspace-name "$WORKSPACE_NAME"
+    --state-name "$STATE_NAME"
+    --scope "$STATE_SCOPE"
+    --input-dir "$INPUT_DIR"
+  )
+  [[ -n "$PROJECT_NAME" ]] && CMD_ARGS+=(--project-name "$PROJECT_NAME")
+  [[ -n "$PROJECT_PATH" ]] && CMD_ARGS+=(--project-path "$PROJECT_PATH")
 
-if [[ -n "$PROJECT_NAME" ]]; then
-  CMD_ARGS+=(--project-name "$PROJECT_NAME")
+  ws_run_command_spec "$SKILL_DIR" "$IMPORT_COMMAND" "${CMD_ARGS[@]}" >&2
+else
+  # 内置 sync_paths 模式：原子提取——先解到临时目录，成功后再合并到项目目录
+  [[ "$STATE_SCOPE" != "global" ]] || \
+    ws_die "sync_paths import not supported for global scope; use import_command instead"
+
+  [[ -f "$INPUT_DIR/state.tgz" ]] || ws_die "Missing state archive: $INPUT_DIR/state.tgz"
+
+  RESTORE_TMP="$TMP_DIR/restore"
+  mkdir -p "$RESTORE_TMP"
+
+  tar -C "$RESTORE_TMP" -xzf "$INPUT_DIR/state.tgz" >&2 || \
+    ws_die "Failed to extract state archive for state: $STATE_NAME"
+
+  cp -R "$RESTORE_TMP/." "$PROJECT_PATH/" >&2 || \
+    ws_die "Failed to restore state to: $PROJECT_PATH"
 fi
-
-if [[ -n "$PROJECT_PATH" ]]; then
-  CMD_ARGS+=(--project-path "$PROJECT_PATH")
-fi
-
-ws_run_command_spec "$SKILL_DIR" "$IMPORT_COMMAND" "${CMD_ARGS[@]}"
 
 MAIN_ARTIFACT="$(head -n 1 "$ARTIFACTS_FILE" | tr -d '\r')"
 

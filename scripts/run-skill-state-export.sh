@@ -17,7 +17,8 @@ usage() {
   cat <<'EOF'
 Usage: ./run-skill-state-export.sh --skill-dir <dir> --workspace-name <name> --state-name <name> --output-dir <dir> [options]
 
-Runs the export_command for one portable state declared in workspace-sync.contract.json.
+Exports one portable state declared in workspace-sync.contract.json.
+Supports two modes: sync_paths (built-in file copy) or export_command (custom script).
 
 Options:
   --skill-dir <dir>        Required. Skill root directory.
@@ -119,7 +120,14 @@ PORTABILITY="$(ws_get_contract_state_string "$CONTRACT_PATH" "$STATE_NAME" "port
 [[ "$PORTABILITY" == "portable" ]] || ws_die "State is not portable: $STATE_NAME"
 
 EXPORT_COMMAND="$(ws_get_contract_state_string "$CONTRACT_PATH" "$STATE_NAME" "export_command")"
-[[ -n "$EXPORT_COMMAND" ]] || ws_die "Missing export_command for state: $STATE_NAME"
+HAS_SYNC_PATHS=0
+while IFS= read -r _sp; do
+  [[ -n "$_sp" ]] && { HAS_SYNC_PATHS=1; break; }
+done < <(ws_get_contract_state_paths "$CONTRACT_PATH" "$STATE_NAME")
+
+if [[ -z "$EXPORT_COMMAND" && "$HAS_SYNC_PATHS" -eq 0 ]]; then
+  ws_die "State '$STATE_NAME' requires either export_command or sync_paths in contract"
+fi
 
 if [[ "$STATE_SCOPE" == "project" ]]; then
   [[ -n "$PROJECT_NAME" ]] || ws_die "--project-name is required for project scope"
@@ -130,29 +138,74 @@ else
   PROJECT_PATH=""
 fi
 
-CMD_ARGS=(
-  --workspace-name "$WORKSPACE_NAME"
-  --state-name "$STATE_NAME"
-  --scope "$STATE_SCOPE"
-  --output-dir "$OUTPUT_DIR"
-)
-
-if [[ -n "$PROJECT_NAME" ]]; then
-  CMD_ARGS+=(--project-name "$PROJECT_NAME")
-fi
-
-if [[ -n "$PROJECT_PATH" ]]; then
-  CMD_ARGS+=(--project-path "$PROJECT_PATH")
-fi
-
-ws_run_command_spec "$SKILL_DIR" "$EXPORT_COMMAND" "${CMD_ARGS[@]}"
-
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 ARTIFACTS_FILE="$TMP_DIR/artifacts.txt"
 FILES_FILE="$TMP_DIR/files.txt"
 : > "$ARTIFACTS_FILE"
 : > "$FILES_FILE"
+
+if [[ -n "$EXPORT_COMMAND" ]]; then
+  # 自定义脚本模式：把脚本的 stdout 重定向到 stderr，保证本 runner 的 stdout 只输出 JSON
+  CMD_ARGS=(
+    --workspace-name "$WORKSPACE_NAME"
+    --state-name "$STATE_NAME"
+    --scope "$STATE_SCOPE"
+    --output-dir "$OUTPUT_DIR"
+  )
+  [[ -n "$PROJECT_NAME" ]] && CMD_ARGS+=(--project-name "$PROJECT_NAME")
+  [[ -n "$PROJECT_PATH" ]] && CMD_ARGS+=(--project-path "$PROJECT_PATH")
+
+  ws_run_command_spec "$SKILL_DIR" "$EXPORT_COMMAND" "${CMD_ARGS[@]}" >&2
+else
+  # 内置 sync_paths 模式：框架直接 tar 指定路径，无需 skill 提供脚本
+  [[ "$STATE_SCOPE" != "global" ]] || \
+    ws_die "sync_paths is not supported for global scope; use export_command instead"
+
+  CONTENT_DIR="$TMP_DIR/content"
+  mkdir -p "$CONTENT_DIR"
+  HAS_CONTENT=0
+
+  while IFS= read -r rel_path; do
+    [[ -n "$rel_path" ]] || continue
+    src="$PROJECT_PATH/$rel_path"
+    if [[ -e "$src" ]]; then
+      dest_parent="$(dirname "$rel_path")"
+      if [[ "$dest_parent" == "." ]]; then
+        dest_dir="$CONTENT_DIR"
+      else
+        dest_dir="$CONTENT_DIR/$dest_parent"
+      fi
+      mkdir -p "$dest_dir"
+      cp -R "$src" "$dest_dir/"
+      HAS_CONTENT=1
+    fi
+  done < <(ws_get_contract_state_paths "$CONTRACT_PATH" "$STATE_NAME")
+
+  [[ "$HAS_CONTENT" -eq 1 ]] || ws_die "sync_paths found no content to export for state: $STATE_NAME"
+
+  SKILL_NAME_ESC="$(ws_json_escape "$SKILL_NAME")"
+  STATE_NAME_ESC="$(ws_json_escape "$STATE_NAME")"
+  STATE_SCOPE_ESC="$(ws_json_escape "$STATE_SCOPE")"
+  PROJECT_NAME_ESC="$(ws_json_escape "${PROJECT_NAME:-}")"
+
+  cat > "$OUTPUT_DIR/manifest.json" <<EOF
+{
+  "skill": "$SKILL_NAME_ESC",
+  "state": "$STATE_NAME_ESC",
+  "scope": "$STATE_SCOPE_ESC",
+  "project": "$PROJECT_NAME_ESC",
+  "format_version": 1,
+  "sync_mode": "paths",
+  "artifacts": [
+    "state.tgz"
+  ]
+}
+EOF
+
+  tar -C "$CONTENT_DIR" -czf "$OUTPUT_DIR/state.tgz" ./ >&2 || \
+    ws_die "Failed to create state archive for state: $STATE_NAME"
+fi
 
 MANIFEST_FILE="$OUTPUT_DIR/manifest.json"
 if [[ -f "$MANIFEST_FILE" ]]; then

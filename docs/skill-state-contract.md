@@ -30,9 +30,74 @@ workspace-sync.contract.json
 结论很简单：
 `workspace-sync` 只编排，skill 自己定义边界并负责实现。
 
+## 两档迁移模式
+
+`workspace-sync` 支持两种工作模式，**优先使用 `sync_paths`**，只有在需要自定义逻辑时才使用脚本。
+
+### 模式一：`sync_paths`（推荐）
+
+直接声明哪些相对路径需要同步，`workspace-sync` 框架自动完成 tar 打包和原子提取，**不需要编写任何导出/导入脚本**。
+
+```json
+{
+  "contract_version": 1,
+  "skill": "sdd",
+  "states": [
+    {
+      "name": "project-state",
+      "scope": "project",
+      "portability": "portable",
+      "sync_paths": [
+        ".sdd/specs",
+        ".sdd/tasks/current.json"
+      ]
+    }
+  ]
+}
+```
+
+适用于：把若干固定的文件或目录原封不动地搬到另一台设备的大多数场景。
+
+### 模式二：`export_command` / `import_command`（自定义脚本）
+
+当需要以下逻辑时才使用：
+- 路径转换（绝对路径 → 相对路径）
+- 索引重建
+- schema 版本迁移
+- 过滤部分文件
+
+```json
+{
+  "contract_version": 1,
+  "skill": "sdd",
+  "states": [
+    {
+      "name": "project-state",
+      "scope": "project",
+      "portability": "portable",
+      "export_command": "./scripts/export-workspace-state.sh",
+      "import_command": "./scripts/import-workspace-state.sh"
+    }
+  ]
+}
+```
+
+**自定义脚本的 stdout 约束**：`workspace-sync` 框架通过 stdout 捕获 runner 的 JSON 结果。脚本的进度日志、调试信息**必须写到 stderr**，不得写 stdout，否则会污染 runner 的 JSON 输出，导致框架无法解析结果。
+
+### 两种模式的对比
+
+| | `sync_paths` | 自定义脚本 |
+|---|---|---|
+| 实现成本 | 零，只写 JSON | 需编写 bash 脚本 |
+| 适用场景 | 固定路径的文件复制 | 需要转换/过滤/重建逻辑 |
+| global scope | 不支持 | 支持 |
+| 原子性 | 内置保证 | 脚本自己负责 |
+
+---
+
 ## 契约格式
 
-最小可用格式：
+最小可用格式（`sync_paths` 模式）：
 
 ```json
 {
@@ -45,8 +110,10 @@ workspace-sync.contract.json
       "description": "当前项目的 spec / task / plan 状态",
       "scope": "project",
       "portability": "portable",
-      "export_command": "./scripts/export-workspace-state.sh",
-      "import_command": "./scripts/import-workspace-state.sh"
+      "sync_paths": [
+        ".sdd/specs",
+        ".sdd/tasks/current.json"
+      ]
     },
     {
       "name": "daemon-cache",
@@ -98,15 +165,16 @@ workspace-sync.contract.json
 - `description`
   一句话说明这个 state 存的是什么
 
-当 `portability=portable` 时，必须额外提供：
+当 `portability=portable` 时，必须额外提供以下之一（二选一）：
 
-- `export_command`
-- `import_command`
+- `sync_paths`（推荐）：路径列表，框架自动完成 tar/untar
+- `export_command` + `import_command`：自定义脚本，处理复杂迁移逻辑
+
+两者同时提供时，`export_command`/`import_command` 优先。
 
 当 `portability=nonportable` 时：
 
-- 不应提供 `export_command`
-- 不应提供 `import_command`
+- 不应提供 `export_command`、`import_command` 或 `sync_paths`
 - `workspace-sync` 不会尝试导出或导入它
 
 ## 语义规则
@@ -196,11 +264,11 @@ workspace-sync.contract.json
 - [`scripts/export-skill-states.sh`](../scripts/export-skill-states.sh)
 - [`scripts/import-skill-states.sh`](../scripts/import-skill-states.sh)
 
-建议 contract 中的 `export_command` / `import_command` 写成“可执行文件路径”:
+建议 contract 中的 `export_command` / `import_command` 写成”可执行文件路径”:
 
 - 优先使用相对 skill 根目录的路径,例如 `./scripts/export-workspace-state.sh`
 - 也可以是绝对路径或 `PATH` 里的命令名
-- 不建议写成带空格的 shell 片段,例如 `bash ./scripts/export.sh`
+- **必须是单一可执行路径，不能包含空格**（`bash ./scripts/export.sh` 这类 shell 片段会直接报错）
 
 ### `export_command`
 

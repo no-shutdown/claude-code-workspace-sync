@@ -111,6 +111,9 @@ CONTRACT_VERSION="$(ws_get_json_string "$CONTRACT_PATH" "contract_version")"
 SKILL_NAME="$(ws_get_json_string "$CONTRACT_PATH" "skill")"
 [[ -n "$SKILL_NAME" ]] || ws_die "Missing skill name in contract: $CONTRACT_PATH"
 
+dup_names="$(ws_validate_contract_state_names "$CONTRACT_PATH")"
+[[ -z "$dup_names" ]] || ws_die "Duplicate state names in contract ($CONTRACT_PATH): $dup_names"
+
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 RESULTS_FILE="$TMP_DIR/results.jsonl"
@@ -194,6 +197,7 @@ run_export() {
   if "$SCRIPT_DIR/run-skill-state-export.sh" "${cmd_args[@]}" >"$result_file" 2>"$error_file"; then
     append_exported_result "$state_name" "$scope" "$project_name" "$relative_dir" "$result_file"
   else
+    rm -rf "$output_dir"  # 清理失败导出留下的残骸，避免随 workspace 上传
     error_text="$(tr '\r\n' ' ' < "$error_file" | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//')"
     [[ -n "$error_text" ]] || error_text="export_failed"
     append_skipped_result "$state_name" "$scope" "$project_name" "$error_text"

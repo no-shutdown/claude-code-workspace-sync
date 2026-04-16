@@ -115,8 +115,10 @@ workspace-sync.contract.json
       "name": "project-state",
       "scope": "project",
       "portability": "portable",
-      "export_command": "./scripts/export-workspace-state.sh",
-      "import_command": "./scripts/import-workspace-state.sh"
+      "sync_paths": [
+        ".sdd/specs",
+        ".sdd/tasks/current.json"
+      ]
     },
     {
       "name": "global-cache",
@@ -126,6 +128,8 @@ workspace-sync.contract.json
   ]
 }
 ```
+
+当需要自定义逻辑（路径转换、索引重建、schema 迁移等）时，改用 `export_command` + `import_command` 替代 `sync_paths`。两者不能同时用于同一个 state。
 
 字段约束:
 - `scope`:

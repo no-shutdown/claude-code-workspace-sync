@@ -5,15 +5,17 @@
   "states": [
     {
       "name": "project-state",
-      "description": "项目内的 spec 和当前任务状态",
+      "description": "项目内的 spec 和当前任务状态(.sdd/specs, .sdd/tasks/current.json)",
       "scope": "project",
       "portability": "portable",
-      "export_command": "./scripts/export-workspace-state.sh",
-      "import_command": "./scripts/import-workspace-state.sh"
+      "sync_paths": [
+        ".sdd/specs",
+        ".sdd/tasks/current.json"
+      ]
     },
     {
       "name": "daemon-runtime",
-      "description": "本机 daemon、锁和缓存",
+      "description": "本机 daemon、锁和缓存，不跨设备同步",
       "scope": "global",
       "portability": "nonportable"
     }
