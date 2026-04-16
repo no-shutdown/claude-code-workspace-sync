@@ -254,7 +254,11 @@ workspace-sync/
     "mc_alias": "claude-workspace-sync"
   },
   "cache_dir": "~/.claude/workspace-cache",
-  "local_paths_file": "~/.claude/skills/workspace-sync/local-paths.json"
+  "local_paths_file": "~/.claude/skills/workspace-sync/local-paths.json",
+  "scan_roots": [
+    "D:/work",
+    "D:/src"
+  ]
 }
 ```
 
@@ -404,7 +408,28 @@ workspace-sync/
 - git remote
 - 本地 `local-paths.json` 映射
 
-第一次在新设备上 `pull` 某个项目时，如果找不到本地路径，Claude 会询问你该项目在本机的仓库目录，并写入：
+第一次在新设备上 `pull` 某个项目时，会按下面顺序解析本地目录：
+
+- 先查 `local-paths.json`
+- 没命中时只扫描 `scan_roots`
+- 用规范化后的 `git remote` 做精确匹配
+- 唯一命中时自动采用并写回映射
+- 多个候选时让用户确认
+- 仍找不到时再询问用户本地路径
+
+这里的“规范化 remote”指的是把下面这些写法：
+
+- `git@gitlab.yc.com:ukon/shanks-manage.git`
+- `ssh://git@gitlab.yc.com/ukon/shanks-manage.git`
+- `https://gitlab.yc.com/ukon/shanks-manage.git`
+
+统一成同一个 key，例如：
+
+```text
+gitlab.yc.com/ukon/shanks-manage
+```
+
+如果最终需要用户确认或手工输入路径，Claude 会把结果写入：
 
 ```text
 ~/.claude/skills/workspace-sync/local-paths.json

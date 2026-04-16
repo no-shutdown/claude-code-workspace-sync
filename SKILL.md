@@ -58,7 +58,11 @@ description: 跨设备同步 Claude Code 工作空间(对话摘要 + 涉及的 g
     "mc_alias": "claude-workspace-sync"
   },
   "cache_dir": "~/.claude/workspace-cache",
-  "local_paths_file": "~/.claude/skills/workspace-sync/local-paths.json"
+  "local_paths_file": "~/.claude/skills/workspace-sync/local-paths.json",
+  "scan_roots": [
+    "D:/work",
+    "D:/src"
+  ]
 }
 ```
 
@@ -140,6 +144,52 @@ workspace-sync.contract.json
 - `nonportable` 状态一律不得导出
 - `workspace-sync` 不为任何 skill 实现专用执行器
 - 其他 skill 只要遵守该接口,就可以被 `workspace-sync` 编排
+
+## local-paths.json 格式
+
+`local_paths_file` 用于保存 “remote key -> local path” 的本机映射。
+推荐格式:
+
+```json
+{
+  "version": 1,
+  "projects": {
+    "gitlab.yc.com/ukon/shanks-manage": {
+      "path": "D:\\A-yc-work\\ukon\\shanks-manage",
+      "repo_name": "shanks-manage",
+      "last_verified_at": "2026-04-16T10:00:00+08:00"
+    },
+    "gitlab.yc.com/ukon/shanks-manage-frontend": {
+      "path": "D:\\A-yc-work\\ukon\\shanks-manage-frontend",
+      "repo_name": "shanks-manage-frontend",
+      "last_verified_at": "2026-04-16T10:00:00+08:00"
+    }
+  }
+}
+```
+
+remote key 必须是规范化后的 git remote,不要直接保存原始字符串。
+规范化规则:
+- 去掉协议头,如 `ssh://`、`https://`
+- 去掉用户信息,如 `git@`
+- 把 `host:path` 和 `host/path` 统一成 `host/path`
+- 去掉结尾 `.git`
+- `host` 统一转成小写
+
+例如:
+- `git@gitlab.yc.com:ukon/shanks-manage.git`
+- `ssh://git@gitlab.yc.com/ukon/shanks-manage.git`
+- `https://gitlab.yc.com/ukon/shanks-manage.git`
+
+都应规范化为:
+
+```text
+gitlab.yc.com/ukon/shanks-manage
+```
+
+`scan_roots` 是可选字段:
+- 用于 `pull` 时扫描本机候选 git 仓库
+- 建议显式配置为 1~3 个稳定的代码根目录,避免扫盘范围过大
 
 ## manifest.json 格式
 
@@ -587,15 +637,51 @@ backend-specific 下载(见下方)。
 ## Step 3: 读 manifest.json,遍历 projects
 
 对每个 project:
-1. 查 `local-paths.json`,用 git_remote 找本地路径
-2. 找不到 → 询问用户,写入 local-paths.json
-3. 到本地路径执行:
+1. 把 `project.remote` 规范化为 `remote_key`
+2. 先查 `local-paths.json`
+   - 如果命中:
+     - 校验路径存在
+     - 校验是 git 仓库
+     - 校验 `git config --get remote.origin.url` 规范化后与 `remote_key` 一致
+     - 校验通过 → 直接使用
+     - 校验失败 → 删除旧映射,继续下一步
+3. 如果 `local-paths.json` 没有命中,或旧映射校验失败:
+   - 只扫描 `scan_roots`
+   - 对每个候选本地仓库读取:
+     - git root
+     - `remote.origin.url`
+     - repo name
+     - branch
+     - 是否干净
+     - 是否包含目标 `head`
+   - 按 `remote_key` 做精确匹配
+4. 如果精确匹配唯一:
+   - 自动选用该路径
+   - 写回 `local-paths.json`
+5. 如果精确匹配到多个候选:
+   - 不要自动选择
+   - 向用户展示每个候选的:
+     - path
+     - branch
+     - 是否干净
+     - 是否已包含 `head`
+   - 让用户确认后写回 `local-paths.json`
+6. 如果没有 `remote_key` 精确匹配:
+   - 可以用 `project.name` 或 repo name 做候选提示
+   - 不要仅凭 repo name 自动选择
+   - 仍找不到 → 询问用户本地路径,校验通过后写入 `local-paths.json`
+7. 拿到确认后的本地路径后,执行:
    - 如果本地项目有未提交改动:`git status --porcelain` 非空 → 报错并跳过该项目,不要覆盖当前工作区
    - `git fetch --all --prune`
    - 校验 `meta.json`/`manifest.json` 里的 `head` 是否存在:`git cat-file -e <head>^{commit}`
    - 不存在 → 报错并跳过该项目
    - 存在 → `git checkout -B <branch> <head>`
    - 如果记录了 `upstream`,则把本地 branch 重新关联到该 upstream
+
+自动匹配约束:
+- 只允许 `remote_key` 唯一命中时自动恢复
+- 不要用 `project.name`、branch、`source_cwd` 单独决定本地路径
+- 多候选或弱提示都必须用户确认
 
 pull 的汇报必须分两层:
 - 工作空间上下文恢复: `summary.md` + `conversation.jsonl`
