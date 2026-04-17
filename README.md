@@ -40,7 +40,7 @@ Claude Code 的上下文默认是本地的。
 ```bash
 /workspace-sync push "feature-x"   # 离开当前设备前
 /workspace-sync pull "feature-x"   # 在另一台设备继续
-/workspace-sync list               # 查看已保存的 workspace
+/workspace-sync list               # 查看列表,并可直接选择一个继续
 /workspace-sync clean "feature-x"  # 手动清理一个 workspace
 ```
 
@@ -310,6 +310,10 @@ workspace-sync/
 ```bash
 /workspace-sync list
 ```
+
+这个命令不再只是“看一下”。
+
+列出 workspace 后，你可以直接回复序号或名称，Claude 会把它当作一次 `pull` 继续恢复，不需要你再手动输入 `/workspace-sync pull <name>`。
 
 ### 4. 手动清理
 

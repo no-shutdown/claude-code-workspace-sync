@@ -1,6 +1,6 @@
 ---
 name: workspace-sync
-description: 跨设备同步 Claude Code 工作空间(对话摘要 + 涉及的 git 项目状态)。支持 GitLab 或 MinIO 两种存储后端,首次使用会引导用户选择和配置。当用户输入 /workspace-sync、`workspace-sync push/pull/list`、或明确提到把当前对话/工作同步到云端、从云端恢复工作空间、跨设备继续之前工作时使用。
+description: 跨设备同步 Claude Code 工作空间(对话摘要 + 涉及的 git 项目状态)。支持 GitLab 或 MinIO 两种存储后端,首次使用会引导用户选择和配置。当用户输入 /workspace-sync、`workspace-sync push/pull/list`、或明确提到把当前对话/工作同步到云端、从云端恢复工作空间、跨设备继续之前工作时使用。`list` 不只是查看,还可以让用户直接从列表里选择一个工作空间继续。
 ---
 
 # Workspace Sync
@@ -35,6 +35,7 @@ description: 跨设备同步 Claude Code 工作空间(对话摘要 + 涉及的 g
 - `/workspace-sync clean --all`
 - "把这次对话同步到云端"、"push 到工作空间"
 - "从 XX 工作空间继续"、"pull workspace XX"
+- "先列出工作空间,我选一个继续"
 
 ## 配置文件
 
@@ -818,6 +819,66 @@ Claude 用 Read 工具读 summary.md,告诉用户恢复了什么,准备继续工
 
 ---
 
+# List 流程
+
+## Step 1: 加载配置并读取当前 backend 下的 workspace 列表
+
+`list` 不是纯只读说明动作,它是用户进入“选择一个继续”流程的入口之一。
+
+Claude 必须先列出当前 backend 下可用的 workspace,并尽量附带这些字段:
+- 序号
+- workspace 名称
+- 版本号
+- 最近更新时间(如果 manifest 可读)
+
+如果拿不到版本或更新时间:
+- 允许退化为只展示名称
+- 但仍然要保留“可选择继续”的交互
+
+如果列表为空,明确告知当前 backend 下没有可恢复的 workspace,然后停止。
+
+## Step 2: 展示列表后立即提供选择入口
+
+当用户执行 `/workspace-sync list` 时,Claude 展示完列表后,默认都要补一句明确引导:
+
+```text
+回复序号或 workspace 名称,我就继续恢复那个工作空间。
+如果你现在只想查看列表,回复 cancel 即可。
+```
+
+如果用户原始意图本来就是“列出后选一个继续”“看看有哪些工作空间然后继续之前的任务”,则更不能停在列表本身,必须主动进入选择步骤,不要要求用户重新手打一遍 `/workspace-sync pull <name>`。
+
+## Step 3: 解析用户选择
+
+用户可以用以下任一方式选择要继续的 workspace:
+- 列表序号
+- workspace 精确名称
+
+解析规则:
+- 序号必须映射到当前刚展示过的列表项
+- 名称必须精确匹配一个 workspace
+- 如果名称或序号不合法,明确报错并要求重新选择
+- 如果名称存在歧义(理论上不应发生,但如果展示层做了截断),必须展示完整名称后重新确认
+
+## Step 4: 选定后直接进入 Pull 流程
+
+一旦用户完成选择,Claude 应把这次操作等价视为:
+
+```bash
+/workspace-sync pull <selected-workspace>
+```
+
+也就是说:
+- 不要再要求用户手动输入一次 `pull`
+- 直接复用下方 Pull 流程
+- 最终回复中明确说明当前是从 `list` 的选择结果继续恢复
+
+交互约束:
+- 仅执行了 `/workspace-sync list` 但用户尚未选择之前,不要自动 pull
+- 即使列表里只有一个 workspace,也先展示并确认,不要擅自恢复
+
+---
+
 # Clean 流程
 
 ## Step 1: 解析命令
@@ -964,8 +1025,20 @@ for WS in */; do
   WS="${WS%/}"
   [[ "$WS" == ".git" ]] && continue
   [[ -f "$WS/manifest.json" ]] || continue
-  echo "- $WS"
+  VERSION=$(python3 -c "import json; print(json.load(open(r'$WS/manifest.json')).get('version', '-'))" 2>/dev/null || echo "-")
+  UPDATED_AT=$(python3 -c "import json; print(json.load(open(r'$WS/manifest.json')).get('updated_at', '-'))" 2>/dev/null || echo "-")
+  echo "$WS|$VERSION|$UPDATED_AT"
 done
+```
+
+Claude 展示时应整理成编号列表,例如:
+
+```text
+1. feature-x (v3, updated 2026-04-17T18:20:00Z)
+2. bugfix-login (v1, updated 2026-04-16T09:10:00Z)
+
+回复序号或 workspace 名称,我就继续恢复那个工作空间。
+如果你现在只想查看列表,回复 cancel 即可。
 ```
 
 ## Clean
@@ -1057,7 +1130,13 @@ mc cp --recursive "$BUCKET_PATH$WS_NAME/" "$STAGE_DIR/"
 ## List
 
 ```bash
-mc ls "$BUCKET_PATH" 2>/dev/null | awk '{print $NF}' | sed 's|/$||'
+for WS in $(mc ls "$BUCKET_PATH" 2>/dev/null | awk '{print $NF}' | sed 's|/$||'); do
+  [[ -n "$WS" ]] || continue
+  MANIFEST_JSON="$(mc cat "$BUCKET_PATH$WS/manifest.json" 2>/dev/null || true)"
+  VERSION="$(printf '%s' "$MANIFEST_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin).get('version', '-'))" 2>/dev/null || echo '-')"
+  UPDATED_AT="$(printf '%s' "$MANIFEST_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin).get('updated_at', '-'))" 2>/dev/null || echo '-')"
+  echo "$WS|$VERSION|$UPDATED_AT"
+done
 ```
 
 ## Clean

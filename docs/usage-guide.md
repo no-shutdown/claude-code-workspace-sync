@@ -33,6 +33,8 @@
 /workspace-sync list
 ```
 
+列出后可以直接回复序号或 workspace 名称，Claude 会继续恢复对应 workspace，不需要再单独输入一次 `pull`。
+
 如果要删除记录，使用：
 
 ```bash
@@ -152,7 +154,7 @@ cd workspace-sync
 /workspace-sync list
 ```
 
-用途：查看当前后端中已有的 workspace。
+用途：查看当前后端中已有的 workspace，并在列出后直接选择一个继续恢复。
 
 ### clean
 
